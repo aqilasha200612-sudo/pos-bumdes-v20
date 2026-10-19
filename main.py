@@ -1,34 +1,42 @@
-from fastapi import FastAPI, Response, Request, Form, Depends, HTTPException, status, BackgroundTasks, Cookie
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-import json
-import base64
-from sqlalchemy import create_engine, Column, Integer, String, Float, or_, text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from datetime import datetime
-import gspread
 import os
-import urllib.parse
-from jinja2 import Template
-from typing import List, Optional
+import json
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
-app = FastAPI(title="POS BUMDes Kembaran Versi 53 (Full Printer Integration)")
+app = FastAPI(title="POS BUMDes Kembaran")
 
-SPREADSHEET_ID = "1nYcOD2tJ006gv9HnzSKi-tbjYLaC9nbGUuKiY02BwAI"
+# Inisialisasi aman Google Sheets
+client = None
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
 
-SECRET_KEY = "BUMDES_RAHASIA_SUPER"
+    SCOPES = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    
+    if os.path.exists("credentials.json"):
+        creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
+        client = gspread.authorize(creds)
+    elif "GOOGLE_CREDENTIALS" in os.environ:
+        creds_data = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+        creds = Credentials.from_service_account_info(creds_data, scopes=SCOPES)
+        client = gspread.authorize(creds)
+except Exception as e:
+    print(f"Peringatan: GSpread gagal diinisialisasi - {e}")
 
-def create_session_token(username: str, nama: str, role: str, shift: str) -> str:
-    data = {"username": username, "nama": nama, "role": role, "shift": shift}
-    json_str = json.dumps(data)
-    return base64.urlsafe_b64encode(json_str.encode()).decode()
+@app.get("/", response_class=HTMLResponse)
+def root():
+    return "<h2>Aplikasi POS BUMDes Kembaran Berhasil Berjalan!</h2><p>Akses <a href='/pos'>/pos</a> untuk halaman kasir.</p>"
 
-def get_current_user(session_token: Optional[str] = Cookie(None)):
-    if not session_token: return None
-    try:
-        json_str = base64.urlsafe_b64decode(session_token.encode()).decode()
-        return json.loads(json_str)
-    except Exception: return None
+@app.get("/pos", response_class=HTMLResponse)
+def pos_page():
+    return "<h2>Halaman Kasir POS</h2><p>Sistem siap digunakan.</p>"
+
+@app.get("/api/status")
+def status():
+    return {"status": "online", "sheets_connected": client is not None}
 
 
 FORBIDDEN_HTML = r'''
