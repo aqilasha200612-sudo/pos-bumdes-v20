@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+sqlalchemy
+gspread
+jinja2
+oauth2client
