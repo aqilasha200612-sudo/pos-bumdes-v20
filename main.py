@@ -74,7 +74,7 @@ def get_gspread_sheet(sheet_name="DataPemesan"):
                 sheet.append_row(["ID Pesanan", "Tanggal", "Nama Pelanggan", "No WhatsApp", "Keterangan", "Total Tagihan", "Nominal DP", "DP Diterima", "Status DP", "Qty Golden", "Qty White", "Lajur Golden", "Baris Golden", "Lajur White", "Baris White", "Aktual Golden", "Aktual White", "Status Pelunasan"])
                 return sheet
             return None
-    except Exception: return None
+    except Exception as e: print("ERROR GSPREAD:", e); return None
 
 def get_app_config():
     sheet = get_gspread_sheet("Config")
