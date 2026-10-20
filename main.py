@@ -143,6 +143,7 @@ def bg_task_sync_aktual_kebun(id_pesanan: str, nama: str, lg: str, bg: int, ag: 
 SQLALCHEMY_DATABASE_URL = "sqlite:////pos_bumdes.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
 class PesananDB(Base):
     __tablename__ = "data_pemesan"
