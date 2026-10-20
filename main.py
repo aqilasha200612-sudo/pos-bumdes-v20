@@ -1,102 +1,33 @@
-from fastapi import FastAPI, Request, Form, HTTPException, status
+from fastapi import FastAPI, Response, Request, Form, Depends, HTTPException, status, BackgroundTasks, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+import json
+import base64
+from sqlalchemy import create_engine, Column, Integer, String, Float, or_, text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime
 import gspread
 import os
-import json
 import urllib.parse
 from jinja2 import Template
+from typing import List, Optional
 
-app = FastAPI(title="POS BUMDes Kembaran Versi 57 (Env & File Credentials)")
+app = FastAPI(title="POS BUMDes Kembaran Versi 53 (Full Printer & Vercel Fix)")
 
 SPREADSHEET_ID = "1nYcOD2tJ006gv9HnzSKi-tbjYLaC9nbGUuKiY02BwAI"
-STATIC_QRIS = "00020101021126590013ID.CO.BNI.WWW011893600009150484690802096175577690303UMI51450015ID.OR.GPNQR.WWW0215ID10266064913750303UMI5204544153033605802ID5915BUMDES KEMBARAN6008BANYUMAS61055318263049AFA"
+SECRET_KEY = "BUMDES_RAHASIA_SUPER"
 
-def safe_float(val) -> float:
-    if val is None or val == "": return 0.0
-    val_str = str(val).strip().replace(' ', '').replace('Rp', '').replace('rp', '').replace('RP', '')
-    if not val_str: return 0.0
-    if val_str.count('.') > 1: val_str = val_str.replace('.', '')
-    if val_str.count(',') > 1: val_str = val_str.replace(',', '')
-    if ',' in val_str and '.' in val_str:
-        if val_str.rfind(',') > val_str.rfind('.'): val_str = val_str.replace(',', '')
-        else: val_str = val_str.replace('.', '').replace(',', '.')
-    elif ',' in val_str: val_str = val_str.replace(',', '.')
-    elif '.' in val_str:
-        if len(val_str.split('.')[-1]) == 3: val_str = val_str.replace('.', '')
-    try: return float(val_str)
-    except ValueError: return 0.0
+def create_session_token(username: str, nama: str, role: str, shift: str) -> str:
+    data = {"username": username, "nama": nama, "role": role, "shift": shift}
+    json_str = json.dumps(data)
+    return base64.urlsafe_b64encode(json_str.encode()).decode()
 
-def create_dynamic_qris(base_qris: str, amount: float) -> str:
-    if amount <= 0: return base_qris
-    amount_str = str(int(amount))
-    tag_54 = f"54{len(amount_str):02d}{amount_str}"
-    idx = base_qris.find("5802ID")
-    if idx == -1: return base_qris
-    new_qris = base_qris[:idx] + tag_54 + base_qris[idx:-4]
-    crc = 0xFFFF
-    for char in new_qris:
-        crc ^= ord(char) << 8
-        for _ in range(8):
-            if (crc & 0x8000) > 0: crc = (crc << 1) ^ 0x1021
-            else: crc = crc << 1
-        crc &= 0xFFFF
-    return new_qris + f"{crc:04X}"
-
-def get_gspread_sheet(sheet_name="DataPemesan"):
-    client = None
-
-    # 1. Coba Otorisasi via Environment Variable Vercel (Solusi Paling Stabil)
-    env_creds = os.environ.get("GOOGLE_CREDENTIALS")
-    if env_creds:
-        try:
-            creds_dict = json.loads(env_creds)
-            client = gspread.service_account_from_dict(creds_dict)
-        except Exception as e:
-            print("Gagal muat creds dari Environment Variable:", e)
-
-    # 2. Jika Env Var tidak ada, coba cari file credentials.json
-    if not client:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        cred_path = os.path.join(base_dir, "credentials.json")
-        if not os.path.exists(cred_path): cred_path = "credentials.json"
-        
-        if os.path.exists(cred_path):
-            try:
-                client = gspread.service_account(filename=cred_path)
-            except Exception as e:
-                print("Gagal muat creds dari file credentials.json:", e)
-
-    if not client:
-        print("ERROR: Kunci Otorisasi Google Sheets tidak ditemukan!")
-        return None
-
+def get_current_user(session_token: Optional[str] = Cookie(None)):
+    if not session_token: return None
     try:
-        spreadsheet = client.open_by_key(SPREADSHEET_ID)
-        return spreadsheet.worksheet(sheet_name)
-    except Exception as e:
-        print("ERROR BUKA WORKSHEET:", e)
-        return None
-
-def get_app_config():
-    sheet = get_gspread_sheet("Config")
-    if sheet:
-        try:
-            records = sheet.get_all_values()
-            if len(records) > 1:
-                row = records[1]
-                return {
-                    "Kuota Promo": int(safe_float(row[0] if len(row)>0 else 100)),
-                    "Persen Diskon": safe_float(row[1] if len(row)>1 else 0),
-                    "Tanggal Panen": str(row[2] if len(row)>2 else "Segera"),
-                    "WA Admin Utama": str(row[3] if len(row)>3 else "628123456789"),
-                    "WA Admin Keuangan": str(row[4] if len(row)>4 else "628123456790"),
-                    "WA Admin Kebun": str(row[5] if len(row)>5 else "628123456791"),
-                    "Harga Per Kg": safe_float(row[6] if len(row)>6 else 52500)
-                }
-        except Exception: pass
-    return {"Kuota Promo": 100, "Persen Diskon": 0.0, "Tanggal Panen": "Segera", "WA Admin Utama": "628123456789", "WA Admin Keuangan": "628123456790", "WA Admin Kebun": "628123456791", "Harga Per Kg": 52500.0}
-
+        json_str = base64.urlsafe_b64decode(session_token.encode()).decode()
+        return json.loads(json_str)
+    except Exception: return None
 
 FORBIDDEN_HTML = r'''
 <!DOCTYPE html>
@@ -126,7 +57,6 @@ FORBIDDEN_HTML = r'''
 </body>
 </html>
 '''
-
 
 class CustomForbiddenException(HTTPException):
     def __init__(self, user: dict):
@@ -181,9 +111,34 @@ def create_dynamic_qris(base_qris: str, amount: float) -> str:
     return new_qris + f"{crc:04X}"
 
 def get_gspread_sheet(sheet_name="DataPemesan"):
-    if not os.path.exists("credentials.json"): return None
+    client = None
+
+    # 1. Prioritas Otorisasi via Environment Variable Vercel (GOOGLE_CREDENTIALS)
+    env_creds = os.environ.get("GOOGLE_CREDENTIALS")
+    if env_creds:
+        try:
+            creds_dict = json.loads(env_creds)
+            client = gspread.service_account_from_dict(creds_dict)
+        except Exception as e:
+            print("Gagal membaca GOOGLE_CREDENTIALS dari ENV:", e)
+
+    # 2. Alternatif via File credentials.json
+    if not client:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        cred_path = os.path.join(base_dir, "credentials.json")
+        if not os.path.exists(cred_path): cred_path = "credentials.json"
+        
+        if os.path.exists(cred_path):
+            try:
+                client = gspread.service_account(filename=cred_path)
+            except Exception as e:
+                print("Gagal membaca credentials.json:", e)
+
+    if not client:
+        print("ERROR: Kunci Otorisasi Google Sheets tidak ditemukan!")
+        return None
+
     try:
-        client = gspread.service_account(filename="credentials.json")
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         try: return spreadsheet.worksheet(sheet_name)
         except Exception:
@@ -215,7 +170,9 @@ def get_gspread_sheet(sheet_name="DataPemesan"):
                 sheet.append_row(["Contoh Reseller", "62822222222", "Reseller", "20", "Aktif", "Mitra penjual"])
                 return sheet
             return None
-    except Exception: return None
+    except Exception as e:
+        print("ERROR OPEN SPREADSHEET:", e)
+        return None
 
 def get_app_config():
     sheet = get_gspread_sheet("Config")
@@ -282,7 +239,12 @@ def bg_task_sync_full_stok_kebun(stok_data: list):
                     pass
         except Exception: pass
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./pos_bumdes.db"
+# Konfigurasi Database SQLite Aman untuk Vercel Serverless
+if os.environ.get("VERCEL"):
+    SQLALCHEMY_DATABASE_URL = "sqlite:////tmp/pos_bumdes.db"
+else:
+    SQLALCHEMY_DATABASE_URL = "sqlite:///./pos_bumdes.db"
+
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -537,12 +499,10 @@ Silakan tunjukkan pesan ini ke kasir. Terima kasih.`;
 
         async function pairBluetoothPrinter() {
             try {
-                // Cek apakah ada printer yang sudah pernah di-pairing sebelumnya
                 let devices = await navigator.bluetooth.getDevices();
                 if (devices.length > 0) {
-                    bluetoothDevice = devices[0]; // Ambil printer terakhir
+                    bluetoothDevice = devices[0];
                 } else {
-                    // Jika belum pernah, buka popup pairing baru
                     bluetoothDevice = await navigator.bluetooth.requestDevice({ 
                         acceptAllDevices: true, 
                         optionalServices: ['000018f0-0000-1000-8000-00805f9b34fb'] 
@@ -611,7 +571,6 @@ Silakan tunjukkan pesan ini ke kasir. Terima kasih.`;
         }
     </script>
 
-
     <!-- Modal Laporan Shift -->
     <div id="modal_shift" class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center hidden">
         <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-5">
@@ -623,12 +582,10 @@ Silakan tunjukkan pesan ini ke kasir. Terima kasih.`;
         </div>
     </div>
     
-    <!-- Hidden Printable Area for Shift Report -->
     <div id="print_area_shift" class="hidden">
         <div style="font-family: monospace; width: 280px; padding: 10px; font-size: 12px; line-height: 1.2; color: #000;" id="print_shift_inner">
         </div>
     </div>
-
 
     <!-- Modal Setting Printer -->
     <div id="modal_printer" class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center hidden">
@@ -821,7 +778,6 @@ SUCCESS_HTML = r"""
         <a href="/pre-order" class="block text-xs text-gray-500 font-semibold hover:underline pt-2">← Buat Pesanan Baru</a>
     </div>
 
-    <!-- Hidden Printable Area for Thermal Struk PO -->
     <div id="print_area" class="hidden">
         <div style="font-family: monospace; width: 280px; padding: 10px; font-size: 12px; line-height: 1.2;">
             <div style="text-align: center; font-weight: bold; font-size: 14px;">BUMDES KEMBARAN</div>
@@ -994,7 +950,6 @@ POS_HTML = r"""
         </div>
     </div>
 
-    <!-- Hidden Printable Receipt Template -->
     <div id="receipt_container" class="hidden">
         <div style="font-family: monospace; width: 280px; padding: 10px; font-size: 12px; line-height: 1.2; color: #000;" id="receipt_content_inner">
             <div style="text-align: center; font-weight: bold; font-size: 15px;">BUMDES KEMBARAN</div>
@@ -1017,7 +972,6 @@ POS_HTML = r"""
         </div>
     </div>
 
-
     <!-- Modal Laporan Shift -->
     <div id="modal_shift" class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center hidden">
         <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-5">
@@ -1029,12 +983,10 @@ POS_HTML = r"""
         </div>
     </div>
     
-    <!-- Hidden Printable Area for Shift Report -->
     <div id="print_area_shift" class="hidden">
         <div style="font-family: monospace; width: 280px; padding: 10px; font-size: 12px; line-height: 1.2; color: #000;" id="print_shift_inner">
         </div>
     </div>
-
 
     <!-- Modal Setting Printer -->
     <div id="modal_printer" class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center hidden">
@@ -1293,7 +1245,6 @@ POS_HTML = r"""
                 kirimBluetoothESC(trx);
             } else {
                 let content = document.getElementById('receipt_container').innerHTML;
-                // Menggandakan konten HTML untuk cetak 2 kali di browser
                 let doubleContent = content + '<div style="margin-top:20px; border-top: 2px dashed #000; padding-top: 10px; text-align: center; font-weight: bold;">COPY</div>' + content;
                 
                 let win = window.open('', '', 'height=600,width=400');
@@ -1316,12 +1267,10 @@ POS_HTML = r"""
         }
         async function pairBluetoothPrinter() {
             try {
-                // Cek apakah ada printer yang sudah pernah di-pairing sebelumnya
                 let devices = await navigator.bluetooth.getDevices();
                 if (devices.length > 0) {
-                    bluetoothDevice = devices[0]; // Ambil printer terakhir
+                    bluetoothDevice = devices[0];
                 } else {
-                    // Jika belum pernah, buka popup pairing baru
                     bluetoothDevice = await navigator.bluetooth.requestDevice({ 
                         acceptAllDevices: true, 
                         optionalServices: ['000018f0-0000-1000-8000-00805f9b34fb'] 
@@ -1344,7 +1293,6 @@ POS_HTML = r"""
             let encoder = new TextEncoder();
             let textData = `\x1B\x40\x1B\x61\x01BUMDES KEMBARAN\nPusat Buah Melon Berkualitas\n--------------------------------\nID: ${trx.id_pos}\nTgl: ${trx.tanggal}\nPlg: ${trx.nama_pelanggan}\n--------------------------------\nTotal: Rp ${trx.total_tagihan.toLocaleString('id-ID')}\nBayar: Rp ${trx.dibayar.toLocaleString('id-ID')}\nKembali: Rp ${trx.kembalian.toLocaleString('id-ID')}\n--------------------------------\nTerima Kasih!\n\n\n`;
             
-            // Menggandakan string untuk cetak 2 kali berurutan
             let printDuaKali = textData + "--- COPY ---\n" + textData;
             await printCharacteristic.writeValue(encoder.encode(printDuaKali));
         }
@@ -1507,8 +1455,6 @@ LAPORAN_HTML = r"""
 </body>
 </html>
 """
-
-
 
 LOGIN_HTML = r"""
 <!DOCTYPE html>
@@ -1675,6 +1621,7 @@ PELANGGAN_HTML = r"""
 </html>
 """
 
+# ======================= ENDPOINTS =======================
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(error: str = ""):
@@ -1699,7 +1646,7 @@ def process_login(response: Response, username: str = Form(...), password: str =
                 else:
                     target_url = "/admin"
                 response = RedirectResponse(url=target_url, status_code=303)
-                response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400) # 24 hours
+                response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400)
                 return response
         if not user_found: return RedirectResponse(url="/login?error=Username+atau+Password+salah!", status_code=303)
     except Exception as e: return RedirectResponse(url=f"/login?error=Error:{str(e)}", status_code=303)
@@ -1721,7 +1668,6 @@ def admin_users_page(user: dict = Depends(require_role(["Admin"]))):
                 if len(row) >= 5: users.append({"username": row[0], "nama": row[2], "wa": row[3], "role": row[4]})
         except Exception: pass
     return HTMLResponse(content=Template(ADMIN_USERS_HTML).render(users=users, user_aktif=user))
-
 
 @app.get("/", response_class=HTMLResponse)
 def root(): return RedirectResponse(url="/pre-order")
@@ -1903,9 +1849,9 @@ def submit_order(
     qty_golden: float = Form(0.0), qty_white: float = Form(0.0), db: Session = Depends(get_db)
 ):
     config = get_app_config()
-    kuota_promo = int(config.get("Kuota Promo", 0))
-    harga = float(config.get("Harga Per Kg", 52500))
-    diskon_persen = float(config.get("Persen Diskon", 0)) if kuota_promo > 0 else 0.0
+    kuota_promo = int(safe_float(config.get("Kuota Promo", 0)))
+    harga = float(safe_float(config.get("Harga Per Kg", 52500)))
+    diskon_persen = float(safe_float(config.get("Persen Diskon", 0))) if kuota_promo > 0 else 0.0
     harga_setelah_diskon = harga - (harga * (diskon_persen / 100.0))
     est_berat = (qty_golden + qty_white) * 1.5
     total = float(est_berat * harga_setelah_diskon)
@@ -2032,9 +1978,6 @@ async def delete_orders(request: Request, db: Session = Depends(get_db)):
         except Exception: pass
     return RedirectResponse(url="/admin", status_code=303)
 
-
-
-
 @app.get("/api/tiket-panen/{id_pesanan}")
 def api_tiket_panen(id_pesanan: str, db: Session = Depends(get_db)):
     order = db.query(PesananDB).filter_by(id_pesanan=id_pesanan).first()
@@ -2044,7 +1987,6 @@ def api_tiket_panen(id_pesanan: str, db: Session = Depends(get_db)):
     return {"id_pesanan": id_pesanan, "nama_pelanggan": order.nama_pelanggan, "items": items}
 
 @app.get("/cetak-sold-out/{id_pesanan}", response_class=HTMLResponse)
-
 def cetak_sold_out(id_pesanan: str, db: Session = Depends(get_db)):
     order = db.query(PesananDB).filter_by(id_pesanan=id_pesanan).first()
     if not order:
@@ -2095,7 +2037,6 @@ def cetak_sold_out(id_pesanan: str, db: Session = Depends(get_db)):
     </html>
     '''
     return HTMLResponse(content=html)
-
 
 @app.get("/export-stok-kebun")
 def export_stok_kebun(db: Session = Depends(get_db)):
@@ -2153,8 +2094,6 @@ def api_laporan_shift(petugas: str = "", shift: str = "", db: Session = Depends(
     qris = 0.0
     
     for t in transaksi:
-        # If petugas or shift are provided and don't match, we still calculate all for today if we don't have login session yet.
-        # But realistically we filter if there is a match in DB
         if petugas and getattr(t, 'nama_petugas', '') and t.nama_petugas != petugas: continue
         if shift and getattr(t, 'shift', '') and t.shift != shift: continue
             
