@@ -138,7 +138,9 @@ def bg_task_sync_aktual_kebun(id_pesanan: str, nama: str, lg: str, bg: int, ag: 
                 sheet.append_row([id_pesanan, waktu, nama, lg, bg, ag, lw, bw, aw])
         except Exception: pass
 
-SQLALCHEMY_DATABASE_URL = "sqlite:///./pos_bumdes.db"
+
+
+SQLALCHEMY_DATABASE_URL = "sqlite:////pos_bumdes.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
