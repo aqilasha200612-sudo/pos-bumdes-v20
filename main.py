@@ -43,14 +43,20 @@ def create_dynamic_qris(base_qris: str, amount: float) -> str:
     return new_qris + f"{crc:04X}"
 
 def get_gspread_sheet(sheet_name="DataPemesan"):
-    if not os.path.exists("credentials.json"): 
-        print("ERROR: credentials.json tidak ada di Vercel!")
+    # Penunjuk jalur absolut lokasi file di server Vercel
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    cred_path = os.path.join(base_dir, "credentials.json")
+    
+    if not os.path.exists(cred_path): 
+        print("ERROR: credentials.json tidak ditemukan di path:", cred_path)
         return None
     try:
-        client = gspread.service_account(filename="credentials.json")
+        client = gspread.service_account(filename=cred_path)
         spreadsheet = client.open_by_key(SPREADSHEET_ID)
         try: return spreadsheet.worksheet(sheet_name)
         except Exception:
+            # ... (sisa kode pembuat worksheet otomatis ke bawah tetap sama)
+            
             if sheet_name == "Config":
                 sheet = spreadsheet.add_worksheet(title="Config", rows=10, cols=10)
                 sheet.append_row(["Kuota Promo", "Persen Diskon", "Tanggal Panen", "WA Admin Utama", "WA Admin Keuangan", "WA Admin Kebun", "Harga Per Kg"])
