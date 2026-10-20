@@ -1,91 +1,18 @@
+from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, BackgroundTasks
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from sqlalchemy import create_engine, Column, Integer, String, Float, or_, text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+from datetime import datetime
+import gspread
 import os
-import json
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+import urllib.parse
+from jinja2 import Template
+from typing import List, Optional
 
-app = FastAPI(title="POS BUMDes Kembaran")
+app = FastAPI(title="POS BUMDes Kembaran Versi 53 (Full Printer Integration)")
 
-# Inisialisasi aman Google Sheets
-client = None
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    SCOPES = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    
-    if os.path.exists("credentials.json"):
-        creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-        client = gspread.authorize(creds)
-    elif "GOOGLE_CREDENTIALS" in os.environ:
-        creds_data = json.loads(os.environ["GOOGLE_CREDENTIALS"])
-        creds = Credentials.from_service_account_info(creds_data, scopes=SCOPES)
-        client = gspread.authorize(creds)
-except Exception as e:
-    print(f"Peringatan: GSpread gagal diinisialisasi - {e}")
-
-@app.get("/", response_class=HTMLResponse)
-def root():
-    return "<h2>Aplikasi POS BUMDes Kembaran Berhasil Berjalan!</h2><p>Akses <a href='/pos'>/pos</a> untuk halaman kasir.</p>"
-
-@app.get("/pos", response_class=HTMLResponse)
-def pos_page():
-    return "<h2>Halaman Kasir POS</h2><p>Sistem siap digunakan.</p>"
-
-@app.get("/api/status")
-def status():
-    return {"status": "online", "sheets_connected": client is not None}
-
-
-FORBIDDEN_HTML = r'''
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Akses Ditolak</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
-    <div class="max-w-md w-full bg-white rounded-2xl shadow-xl p-8 text-center space-y-4 border">
-        <div class="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center text-3xl mx-auto font-black">!</div>
-        <h1 class="text-xl font-black text-gray-800">Akses Ditolak (403)</h1>
-        <p class="text-xs text-gray-500 leading-relaxed">Anda login sebagai <strong class="text-gray-800">{{ user.nama }}</strong> dengan role <strong class="text-gray-800">{{ user.role }}</strong>. Akun Anda tidak memiliki izin untuk mengakses halaman ini.</p>
-        <div class="pt-4 flex flex-col gap-2">
-            {% if user.role == 'Kasir' %}
-            <a href="/pos" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl text-xs shadow">Kembali ke Kasir POS</a>
-            {% elif user.role == 'Admin Kebun' %}
-            <a href="/admin-kebun" class="w-full bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs shadow">Kembali ke Panel Admin Kebun</a>
-            {% elif user.role == 'Admin Keuangan' %}
-            <a href="/admin" class="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl text-xs shadow">Kembali ke Panel Admin</a>
-            {% else %}
-            <a href="/pre-order" class="w-full bg-gray-800 text-white font-bold py-2.5 rounded-xl text-xs shadow">Kembali ke Halaman Utama</a>
-            {% endif %}
-            <a href="/logout" class="w-full bg-red-50 text-red-700 font-bold py-2 rounded-xl text-xs hover:bg-red-100">Ganti Akun / Logout</a>
-        </div>
-    </div>
-</body>
-</html>
-'''
-
-
-class CustomForbiddenException(HTTPException):
-    def __init__(self, user: dict):
-        super().__init__(status_code=403)
-        self.user = user
-
-def require_role(allowed_roles: list):
-    def role_checker(user: dict = Depends(get_current_user)):
-        if not user: raise HTTPException(status_code=303, headers={"Location": "/login"})
-        if user.get("role") not in allowed_roles and user.get("role") != "Admin":
-            raise CustomForbiddenException(user=user)
-        return user
-    return role_checker
-
-@app.exception_handler(CustomForbiddenException)
-async def custom_forbidden_handler(request: Request, exc: CustomForbiddenException):
-    return HTMLResponse(content=Template(FORBIDDEN_HTML).render(user=exc.user), status_code=403)
-
+SPREADSHEET_ID = "1nYcOD2tJ006gv9HnzSKi-tbjYLaC9nbGUuKiY02BwAI"
 STATIC_QRIS = "00020101021126590013ID.CO.BNI.WWW011893600009150484690802096175577690303UMI51450015ID.OR.GPNQR.WWW0215ID10266064913750303UMI5204544153033605802ID5915BUMDES KEMBARAN6008BANYUMAS61055318263049AFA"
 
 def safe_float(val) -> float:
@@ -134,26 +61,12 @@ def get_gspread_sheet(sheet_name="DataPemesan"):
                 sheet.append_row([100, 10, "2026-11-15", "628123456789", "628123456790", "628123456791", 52500])
                 return sheet
             elif sheet_name == "POS":
-                sheet = spreadsheet.add_worksheet(title="POS", rows=100, cols=14)
-                sheet.append_row(["ID POS", "Tanggal", "Tipe Transaksi", "ID Referensi PO", "Nama Pelanggan", "Qty Golden (Butir/KG)", "Qty White (Butir/KG)", "Diskon", "Total Tagihan", "Dibayar", "Kembalian", "Metode Pembayaran", "Shift", "Petugas Kasir"])
+                sheet = spreadsheet.add_worksheet(title="POS", rows=100, cols=12)
+                sheet.append_row(["ID POS", "Tanggal", "Tipe Transaksi", "ID Referensi PO", "Nama Pelanggan", "Qty Golden (Butir/KG)", "Qty White (Butir/KG)", "Diskon", "Total Tagihan", "Dibayar", "Kembalian", "Metode Pembayaran"])
                 return sheet
             elif sheet_name == "Aktual_Kebun":
                 sheet = spreadsheet.add_worksheet(title="Aktual_Kebun", rows=100, cols=10)
-                sheet.append_row(["ID Stok", "Lajur", "Baris", "Jenis Buah", "Berat Aktual (KG)", "Status", "ID Pesanan (PO)", "Nama Pemesan", "Waktu Update"])
-                return sheet
-            elif sheet_name == "Admin_Users":
-                sheet = spreadsheet.add_worksheet(title="Admin_Users", rows=50, cols=5)
-                sheet.append_row(["Username", "Password", "Nama Lengkap", "No WhatsApp", "Role Akses"])
-                sheet.append_row(["BUDI", "290878", "BUDIONO", "08974982752", "Admin"])
-                sheet.append_row(["KEUANGAN", "123456", "Staff Keuangan", "08123456789", "Admin Keuangan"])
-                sheet.append_row(["KEBUN", "123456", "Petugas Kebun", "08123456780", "Admin Kebun"])
-                sheet.append_row(["KASIR1", "123456", "Kasir Utama", "08123456781", "Kasir"])
-                return sheet
-            elif sheet_name == "DataPelanggan":
-                sheet = spreadsheet.add_worksheet(title="DataPelanggan", rows=100, cols=6)
-                sheet.append_row(["Nama Pelanggan", "No WhatsApp", "Kategori Member", "Diskon Khusus (%)", "Status Aktif", "Catatan"])
-                sheet.append_row(["Contoh VIP", "62811111111", "VIP", "15", "Aktif", "Member prioritas"])
-                sheet.append_row(["Contoh Reseller", "62822222222", "Reseller", "20", "Aktif", "Mitra penjual"])
+                sheet.append_row(["ID Pesanan", "Waktu Timbang", "Nama Pelanggan", "Lajur Golden", "Baris Golden", "Aktual Golden (KG)", "Lajur White", "Baris White", "Aktual White (KG)"])
                 return sheet
             return None
     except Exception: return None
@@ -207,20 +120,22 @@ def bg_task_update_sel(id_pesanan: str, col_updates: dict):
                     break
         except Exception: pass
 
-def bg_task_sync_full_stok_kebun(stok_data: list):
+def bg_task_sync_aktual_kebun(id_pesanan: str, nama: str, lg: str, bg: int, ag: float, lw: str, bw: int, aw: float):
     sheet = get_gspread_sheet("Aktual_Kebun")
     if sheet:
         try:
-            sheet.clear()
-            header = ["ID Stok", "Lajur", "Baris", "Jenis Buah", "Berat Aktual (KG)", "Status", "ID Pesanan (PO)", "Nama Pemesan", "Waktu Update"]
-            data_to_write = [header] + stok_data
-            try:
-                sheet.update('A1', data_to_write)
-            except Exception:
-                try:
-                    sheet.update(data_to_write)
-                except Exception:
-                    pass
+            records = sheet.get_all_values()
+            waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            row_idx = -1
+            for i, row in enumerate(records):
+                if len(row) > 0 and row[0] == id_pesanan:
+                    row_idx = i + 1
+                    break
+            if row_idx != -1:
+                updates = {2: waktu, 3: nama, 4: lg, 5: bg, 6: ag, 7: lw, 8: bw, 9: aw}
+                for col_idx, val in updates.items(): sheet.update_cell(row_idx, col_idx, val)
+            else:
+                sheet.append_row([id_pesanan, waktu, nama, lg, bg, ag, lw, bw, aw])
         except Exception: pass
 
 SQLALCHEMY_DATABASE_URL = "sqlite:///./pos_bumdes.db"
@@ -263,8 +178,6 @@ class PosDB(Base):
     dibayar = Column(Float, default=0.0)
     kembalian = Column(Float, default=0.0)
     metode_pembayaran = Column(String, default="Tunai")
-    nama_petugas = Column(String, default="Kasir")
-    shift = Column(String, default="Shift 1")
 
 class StokKebunDB(Base):
     __tablename__ = "stok_kebun"
@@ -295,63 +208,13 @@ ADMIN_KEBUN_HTML = r"""
 </head>
 <body class="bg-emerald-50 min-h-screen pb-10">
     <nav class="bg-emerald-700 shadow-md px-6 py-4 flex justify-between items-center sticky top-0 z-50 text-white">
-        <div class="flex items-center space-x-3"><span class="text-2xl">👨‍🌾</span><span class="text-xl font-black tracking-wide">PANEL ADMIN KEBUN</span> <div class="ml-4 px-3 py-1 rounded bg-emerald-800 text-sm font-semibold border border-emerald-500">Halo, {{ user_aktif.nama if user_aktif else "Admin" }}</div></div>
-        <div class="flex space-x-3 text-sm items-center">
-            <button type="button" onclick="bukaModalPrinter()" class="bg-teal-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow hover:bg-teal-700 transition">🖨️ Printer</button>
+        <div class="flex items-center space-x-3"><span class="text-2xl">👨‍🌾</span><span class="text-xl font-black tracking-wide">PANEL ADMIN KEBUN</span></div>
+        <div class="flex space-x-3 text-sm">
             <a href="/admin" class="bg-white text-emerald-800 px-3 py-1.5 rounded font-bold text-xs shadow hover:bg-gray-100 transition">← Admin Pusat</a>
-            <a href="/pos" class="bg-blue-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow hover:bg-blue-700 transition">🛒 Kasir</a>
-            <a href="/logout" class="bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow ml-2">🚪 Keluar</a>
+            <a href="/pos" class="bg-blue-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow hover:bg-blue-700 transition">🛒 Ke Kasir</a>
         </div>
     </nav>
     <div class="max-w-7xl mx-auto p-4 space-y-6 mt-4">
-        <!-- DASHBOARD LAPORAN STOK -->
-        <div class="bg-white rounded-2xl shadow-sm border border-emerald-200 overflow-hidden">
-            <div class="p-4 bg-emerald-800 text-white flex justify-between items-center">
-                <h2 class="font-bold text-lg">📊 Dashboard Rekap Stok Kebun</h2>
-                <a href="/export-stok-kebun" target="_blank" class="bg-emerald-500 hover:bg-emerald-400 text-white px-4 py-1.5 rounded font-bold text-xs shadow-md transition flex items-center gap-2">
-                    📥 Export CSV
-                </a>
-            </div>
-            <div class="p-5 bg-emerald-50/50 grid grid-cols-1 md:grid-cols-2 gap-5">
-                <!-- Golden -->
-                <div class="bg-white p-4 rounded-xl border border-yellow-200 shadow-sm flex flex-col">
-                    <div class="font-bold text-gray-800 border-b pb-2 mb-3 flex items-center">
-                        <div class="w-3 h-3 rounded-full bg-yellow-400 mr-2"></div>Melon Golden Humi
-                    </div>
-                    <div class="grid grid-cols-2 gap-3 text-sm">
-                        <div class="bg-green-50 p-3 rounded-lg text-center border border-green-100">
-                            <div class="text-xs text-gray-500 font-semibold mb-1">Stok Tersedia</div>
-                            <div class="font-black text-green-700 text-2xl">{{ rekap_stok['Golden']['Tersedia_Butir'] }} <span class="text-xs font-normal">Btr</span></div>
-                            <div class="text-xs font-bold text-green-800 mt-1">{{ "%.2f"|format(rekap_stok['Golden']['Tersedia_Kg']) }} KG</div>
-                        </div>
-                        <div class="bg-orange-50 p-3 rounded-lg text-center border border-orange-100">
-                            <div class="text-xs text-gray-500 font-semibold mb-1">Telah Diplot PO</div>
-                            <div class="font-black text-orange-700 text-2xl">{{ rekap_stok['Golden']['Dipesan_Butir'] }} <span class="text-xs font-normal">Btr</span></div>
-                            <div class="text-xs font-bold text-orange-800 mt-1">{{ "%.2f"|format(rekap_stok['Golden']['Dipesan_Kg']) }} KG</div>
-                        </div>
-                    </div>
-                </div>
-                <!-- White -->
-                <div class="bg-white p-4 rounded-xl border border-teal-200 shadow-sm flex flex-col">
-                    <div class="font-bold text-gray-800 border-b pb-2 mb-3 flex items-center">
-                        <div class="w-3 h-3 rounded-full bg-teal-400 mr-2"></div>Melon White Humi
-                    </div>
-                    <div class="grid grid-cols-2 gap-3 text-sm">
-                        <div class="bg-green-50 p-3 rounded-lg text-center border border-green-100">
-                            <div class="text-xs text-gray-500 font-semibold mb-1">Stok Tersedia</div>
-                            <div class="font-black text-green-700 text-2xl">{{ rekap_stok['White']['Tersedia_Butir'] }} <span class="text-xs font-normal">Btr</span></div>
-                            <div class="text-xs font-bold text-green-800 mt-1">{{ "%.2f"|format(rekap_stok['White']['Tersedia_Kg']) }} KG</div>
-                        </div>
-                        <div class="bg-orange-50 p-3 rounded-lg text-center border border-orange-100">
-                            <div class="text-xs text-gray-500 font-semibold mb-1">Telah Diplot PO</div>
-                            <div class="font-black text-orange-700 text-2xl">{{ rekap_stok['White']['Dipesan_Butir'] }} <span class="text-xs font-normal">Btr</span></div>
-                            <div class="text-xs font-bold text-orange-800 mt-1">{{ "%.2f"|format(rekap_stok['White']['Dipesan_Kg']) }} KG</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <div class="bg-white rounded-2xl shadow-sm border border-emerald-200 overflow-hidden">
             <div class="p-4 bg-emerald-600 text-white flex justify-between items-center"><h2 class="font-bold text-lg">➕ Input Stok Buah Tersedia di Kebun</h2></div>
             <div class="p-5 bg-emerald-50/50">
@@ -415,8 +278,7 @@ ADMIN_KEBUN_HTML = r"""
                                 {% else %}<div class="text-xs text-gray-400 italic">Tidak beli White</div>{% endif %}
                             </td>
                             <td class="p-4 text-center space-y-2 align-top">
-                                <button type="button" onclick="simpanPlotting('{{ p.id_pesanan }}')" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded text-xs font-bold shadow mb-1">💾 Tandai & Simpan</button>
-                                <button type="button" onclick="cetakPlotPanen('{{ p.id_pesanan }}')" class="block w-full text-center bg-gray-800 hover:bg-black text-white px-3 py-2 rounded text-[10px] font-bold shadow">🖨️ Cetak Plot Panen</button>
+                                <button type="button" onclick="simpanPlotting('{{ p.id_pesanan }}')" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded text-xs font-bold shadow">💾 Tandai Denah & Simpan</button>
                                 <button type="button" onclick="kirimWA('{{ p.id_pesanan }}', '{{ p.nama_pelanggan }}', '{{ p.no_whatsapp }}', {{ p.qty_golden }}, {{ p.qty_white }})" class="w-full bg-green-500 hover:bg-green-600 text-white px-3 py-2 rounded text-xs font-bold shadow">📱 Kirim WA</button>
                             </td>
                         </tr>
@@ -457,124 +319,7 @@ Pesanan (ID: *${id}*) sudah siap di kebun:
 Silakan tunjukkan pesan ini ke kasir. Terima kasih.`;
             window.open(`https://api.whatsapp.com/send?phone=${no}&text=` + encodeURIComponent(pesan), '_blank');
         }
-
-        let bluetoothDevice = null, printCharacteristic = null;
-        
-        window.addEventListener('DOMContentLoaded', () => {
-            let pm = localStorage.getItem('print_method') || 'browser';
-            let radios = document.getElementsByName('print_method');
-            if (radios.length > 0) {
-                for(let r of radios) {
-                    if(r.value === pm) r.checked = true;
-                    r.addEventListener('change', (e) => {
-                        localStorage.setItem('print_method', e.target.value);
-                    });
-                }
-            }
-        });
-
-        function bukaModalPrinter() { document.getElementById('modal_printer').classList.remove('hidden'); }
-        function tutupModalPrinter() { document.getElementById('modal_printer').classList.add('hidden'); }
-
-        async function pairBluetoothPrinter() {
-            try {
-                bluetoothDevice = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: ['000018f0-0000-1000-8000-00805f9b34fb'] });
-                let server = await bluetoothDevice.gatt.connect();
-                let service = await server.getPrimaryService('000018f0-0000-1000-8000-00805f9b34fb');
-                printCharacteristic = await service.getCharacteristic('00002af1-0000-1000-8000-00805f9b34fb');
-                document.getElementById('status_bt').innerText = "Terhubung"; document.getElementById('status_bt').className = "text-[10px] px-2 py-0.5 rounded bg-green-100 text-green-700 font-bold";
-                alert("Printer Bluetooth berhasil terhubung!");
-            } catch(e) { alert("Koneksi Bluetooth gagal/dibatalkan: " + e.message); }
-        }
-
-        async function cetakStrukContoh() {
-            let pm = localStorage.getItem('print_method') || 'browser';
-            if (pm === 'browser') {
-                alert("Metode Browser terpilih. Test print hanya untuk Bluetooth.");
-            } else {
-                if(!printCharacteristic) { alert("Hubungkan Bluetooth dulu!"); return; }
-                let encoder = new TextEncoder();
-                let textData = "\x1B\x40\x1B\x61\x01TEST CETAK KEBUN\n--------------------------------\nTest koneksi Bluetooth OK!\n--------------------------------\n\n\n";
-                await printCharacteristic.writeValue(encoder.encode(textData));
-            }
-        }
-
-        async function cetakPlotPanen(id) {
-            let pm = localStorage.getItem('print_method') || 'browser';
-            if (pm === 'browser') {
-                window.open('/cetak-sold-out/' + id, '_blank');
-            } else {
-                if (!printCharacteristic) {
-                    alert("Printer Bluetooth belum terhubung! Silakan klik Hubungkan BT pada Setting Printer.");
-                    bukaModalPrinter();
-                    return;
-                }
-                try {
-                    let res = await fetch('/api/tiket-panen/' + id);
-                    if(!res.ok) throw new Error("Gagal mengambil data");
-                    let data = await res.json();
-                    
-                    let encoder = new TextEncoder();
-                    let textData = "\x1B\x40\x1B\x61\x01BUMDES KEMBARAN\nTIKET PANEN KEBUN (SOLD OUT)\n--------------------------------\nID PO : " + data.id_pesanan + "\nPlg   : " + data.nama_pelanggan + "\n--------------------------------\n";
-                    
-                    if (data.items.length === 0) {
-                        textData += "Belum ada buah diplot.\n";
-                    } else {
-                        for(let it of data.items) {
-                            textData += "- " + it.jenis + " (Ljr " + it.lajur + "-Brs " + it.baris + "): " + it.berat + " Kg\n";
-                        }
-                    }
-                    
-                    let now = new Date();
-                    let tglStr = now.getFullYear() + "-" + String(now.getMonth()+1).padStart(2,'0') + "-" + String(now.getDate()).padStart(2,'0') + " " + String(now.getHours()).padStart(2,'0') + ":" + String(now.getMinutes()).padStart(2,'0');
-                    textData += "--------------------------------\nDicetak: " + tglStr + "\n\n\n";
-                    
-                    await printCharacteristic.writeValue(encoder.encode(textData));
-                } catch(e) {
-                    alert("Gagal mencetak: " + e.message);
-                }
-            }
-        }
     </script>
-
-
-    <!-- Modal Laporan Shift -->
-    <div id="modal_shift" class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center hidden">
-        <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-5">
-            <div class="flex justify-between items-center border-b pb-3"><h3 class="font-bold text-gray-800 text-lg">📊 Laporan Jual Kasir (Per Shift)</h3><button type="button" onclick="tutupModalShift()" class="text-gray-400 font-bold text-lg">✕</button></div>
-            <div class="space-y-4 text-sm" id="area_laporan_shift">
-                <div class="text-center py-5 text-gray-500 font-bold">Memuat data...</div>
-            </div>
-            <div class="flex justify-end pt-2"><button type="button" onclick="cetakLaporanShift()" class="bg-blue-600 text-white px-4 py-2 rounded text-xs font-bold mr-2">🖨️ Cetak Rekap (Thermal)</button><button type="button" onclick="tutupModalShift()" class="bg-gray-200 px-4 py-2 rounded text-xs font-bold">Tutup</button></div>
-        </div>
-    </div>
-    
-    <!-- Hidden Printable Area for Shift Report -->
-    <div id="print_area_shift" class="hidden">
-        <div style="font-family: monospace; width: 280px; padding: 10px; font-size: 12px; line-height: 1.2; color: #000;" id="print_shift_inner">
-        </div>
-    </div>
-
-
-    <!-- Modal Setting Printer -->
-    <div id="modal_printer" class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center hidden">
-        <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl space-y-5">
-            <div class="flex justify-between items-center border-b pb-3"><h3 class="font-bold text-gray-800 text-lg">🖨️ Pengaturan Printer & Ukuran Kertas</h3><button type="button" onclick="tutupModalPrinter()" class="text-gray-400 font-bold text-lg">✕</button></div>
-            <div class="space-y-4 text-sm">
-                <div class="bg-gray-50 p-4 rounded-xl border"><label class="font-bold text-gray-700 block text-xs mb-2">Pilih Metode Cetak & Kertas</label>
-                    <div class="space-y-2">
-                        <label class="flex items-center space-x-2 bg-white p-2.5 border rounded-lg cursor-pointer"><input type="radio" name="print_method" value="browser" checked class="text-emerald-600"><span>🖨️ Dialog Print Browser (Rekomendasi / USB / PDF / Printer Windows)</span></label>
-                        <label class="flex items-center space-x-2 bg-white p-2.5 border rounded-lg cursor-pointer"><input type="radio" name="print_method" value="bluetooth" class="text-emerald-600"><span>📶 Bluetooth Thermal Printer (Android / PC Web Bluetooth)</span></label>
-                    </div>
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                    <div class="border p-4 rounded-xl bg-gray-50"><div class="font-bold text-gray-700 flex justify-between text-xs mb-2"><span>Bluetooth</span><span id="status_bt" class="text-[10px] px-2 py-0.5 rounded bg-red-100 text-red-700 font-bold">Terputus</span></div><button type="button" onclick="pairBluetoothPrinter()" class="w-full bg-blue-600 text-white font-bold py-2 rounded text-xs mb-1">🔗 Hubungkan BT</button></div>
-                    <div class="border p-4 rounded-xl bg-gray-50"><div class="font-bold text-gray-700 flex justify-between text-xs mb-2"><span>Test Cetak</span><span class="text-[10px] px-2 py-0.5 rounded bg-green-100 text-green-700 font-bold">Ready</span></div><button type="button" onclick="cetakStrukContoh()" class="w-full bg-yellow-600 text-white font-bold py-2.5 rounded text-xs mt-2">🖨️ Test Print</button></div>
-                </div>
-            </div>
-            <div class="flex justify-end pt-2"><button type="button" onclick="tutupModalPrinter()" class="bg-gray-200 px-4 py-2 rounded text-xs font-bold">Tutup</button></div>
-        </div>
-    </div>
 </body>
 </html>
 """
@@ -589,20 +334,7 @@ PRE_ORDER_HTML = r"""
 </head>
 <body class="bg-gray-100 pb-20">
     <header class="bg-shopee text-white p-4 shadow-md sticky top-0 z-50">
-        <div class="max-w-md mx-auto flex justify-between items-center">
-            <h1 class="font-bold text-lg">Pre-Order BUMDes</h1>
-            <div class="relative" onclick="this.querySelector('.dropdown-menu').classList.toggle('hidden')">
-                <button class="text-xs bg-white text-shopee px-2.5 py-1 rounded font-bold shadow flex items-center gap-1 cursor-pointer">
-                    Login
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
-                </button>
-                <div class="dropdown-menu hidden absolute right-0 mt-2 w-40 bg-white rounded-md shadow-xl z-50 text-gray-800 text-xs border border-gray-100 overflow-hidden">
-                    <a href="/login" class="block px-4 py-2 hover:bg-gray-100 border-b font-bold text-shopee">🔑 Login Admin</a>
-                    <a href="/login" class="block px-4 py-2 hover:bg-gray-100 border-b">Login Admin Kebun</a>
-                    <a href="/login" class="block px-4 py-2 hover:bg-gray-100">Login Admin Keuangan</a>
-                </div>
-            </div>
-        </div>
+        <div class="max-w-md mx-auto flex justify-between items-center"><h1 class="font-bold text-lg">Pre-Order BUMDes Kembaran</h1><a href="/admin" class="text-xs bg-white text-shopee px-2.5 py-1 rounded font-bold shadow">Admin</a></div>
     </header>
     <main class="max-w-md mx-auto bg-white min-h-screen pb-10">
         <div class="flex justify-center p-4 bg-gray-50 border-b"><img src="https://lh3.googleusercontent.com/d/1ZljExg4TXAp_DAQXrJEQJCjS_wjTLFAY" class="h-24 object-contain"></div>
@@ -652,62 +384,27 @@ PRE_ORDER_HTML = r"""
                 </div>
             </div>
             <div class="bg-gray-50 p-4 rounded-xl border space-y-3 mt-4">
-                <div><label class="text-xs text-gray-600 font-semibold block mb-1">Nama Lengkap</label><input type="text" name="nama_pelanggan" id="po_nama" required class="w-full p-2 border rounded text-sm focus:border-shopee"></div>
-                <div><label class="text-xs text-gray-600 font-semibold block mb-1">WhatsApp Aktif</label><div class="flex space-x-2"><input type="tel" name="no_whatsapp" id="po_wa" required class="w-full p-2 border rounded text-sm focus:border-shopee"><button type="button" onclick="cekMemberPO(event)" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-xs font-bold shadow whitespace-nowrap">Cek Member</button></div><div id="info_member_po" class="text-[10px] text-green-600 font-bold mt-1 hidden"></div><input type="hidden" id="po_diskon_member" value="0"></div>
+                <div><label class="text-xs text-gray-600 font-semibold block mb-1">Nama Lengkap</label><input type="text" name="nama_pelanggan" required class="w-full p-2 border rounded text-sm focus:border-shopee"></div>
+                <div><label class="text-xs text-gray-600 font-semibold block mb-1">WhatsApp Aktif</label><input type="tel" name="no_whatsapp" required class="w-full p-2 border rounded text-sm focus:border-shopee"></div>
                 <div><label class="text-xs text-gray-600 font-semibold block mb-1">Keterangan (Opsional)</label><textarea name="keterangan" class="w-full p-2 border rounded text-sm focus:border-shopee" rows="2"></textarea></div>
             </div>
             <button type="submit" class="w-full bg-shopee text-white font-bold py-3.5 rounded-lg shadow-lg text-sm transition mt-2">Pesan Sekarang & Bayar DP 🚀</button>
         </form>
     </main>
     <script>
-        const hargaAsli = {{ harga_asli }};
-        const promoGlobal = {{ persen_diskon }};
+        const hargaAktual = {{ harga_diskon if ada_promo else harga_asli }};
         function hitungTotal() {
             let qG = parseInt(document.getElementById('qty_golden').value) || 0;
             let qW = parseInt(document.getElementById('qty_white').value) || 0;
             let estBeratG = qG * 1.5;
             let estBeratW = qW * 1.5;
             let totalEstBerat = estBeratG + estBeratW;
-            let diskonMember = parseFloat(document.getElementById('po_diskon_member')?.value || 0);
-            let diskonAktif = diskonMember > promoGlobal ? diskonMember : promoGlobal;
-            let hargaAktual = hargaAsli - (hargaAsli * (diskonAktif / 100.0));
             let total = totalEstBerat * hargaAktual;
             document.getElementById('est_golden').innerText = estBeratG.toFixed(1);
             document.getElementById('est_white').innerText = estBeratW.toFixed(1);
             document.getElementById('tampil_est_berat').innerText = totalEstBerat.toFixed(1) + ' KG';
             document.getElementById('tampil_total').innerText = 'Rp ' + total.toLocaleString('id-ID');
             document.getElementById('tampil_dp').innerText = 'Rp ' + (total/2).toLocaleString('id-ID');
-        }
-
-        function cekMemberPO(e) {
-            let wa = document.getElementById('po_wa').value.trim();
-            if(!wa) return;
-            let btn = e.target;
-            let oldText = btn.innerText;
-            btn.innerText = 'Cek...';
-            fetch('/api/cari-pelanggan?q=' + encodeURIComponent(wa)).then(r => r.json()).then(data => {
-                btn.innerText = oldText;
-                let infoEl = document.getElementById('info_member_po');
-                if(data.length > 0) {
-                    let m = data[0];
-                    document.getElementById('po_nama').value = m.nama;
-                    document.getElementById('po_diskon_member').value = m.diskon;
-                    infoEl.innerText = `✅ Halo ${m.nama} (${m.kategori})! Diskon member ${m.diskon}% diterapkan.`;
-                    infoEl.classList.remove('hidden');
-                    infoEl.classList.remove('text-red-600');
-                    infoEl.classList.add('text-green-600');
-                    hitungTotal();
-                } else {
-                    document.getElementById('po_diskon_member').value = '0';
-                    infoEl.innerText = `❌ Nomor WA tidak terdaftar sebagai member.`;
-                    infoEl.classList.remove('hidden');
-                    infoEl.classList.remove('text-green-600');
-                    infoEl.classList.add('text-red-600');
-                    hitungTotal();
-                }
-            }).catch(err => {
-                btn.innerText = oldText;
-            });
         }
     </script>
 </body>
@@ -798,22 +495,15 @@ POS_HTML = r"""
     <script>tailwind.config = { theme: { extend: { colors: { pos: '#0284c7', poshigh: '#0369a1' } } } }</script>
 </head>
 <body class="bg-gray-100 min-h-screen">
-
     <nav class="bg-white shadow-sm border-b px-6 py-4 flex justify-between items-center sticky top-0 z-50">
         <div class="flex items-center space-x-3"><span class="text-2xl">🛒</span><span class="text-xl font-black text-pos">KASIR POS</span></div>
         <div class="flex space-x-3 text-sm items-center">
-            <button type="button" onclick="bukaModalShift()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-3 py-1.5 rounded text-xs shadow">📊 Laporan Shift Hari Ini</button>
             <a href="/admin-kebun" class="bg-emerald-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow hover:bg-emerald-700">👨‍🌾 Kebun</a>
-            <button type="button" id="btnReprint" onclick="cetakUlangStruk()" class="bg-orange-500 hover:bg-orange-600 text-white font-bold px-3 py-1.5 rounded text-xs shadow hidden">🖨️ Cetak Struk</button>
-            <button type="button" onclick="bukaModalPrinter()" class="bg-teal-600 hover:bg-teal-700 text-white font-bold px-3 py-1.5 rounded text-xs shadow">🖨️ Printer</button>
-            {% if user_aktif.role != 'Kasir' %}<a href="/admin" class="font-semibold text-gray-600 hover:text-pos py-1">← Admin</a>{% endif %}
-            <div class="border-l pl-3 ml-2 flex items-center space-x-2">
-                <div class="text-right leading-tight"><div class="font-black text-gray-800 text-[10px]">{{ user_aktif.nama }}</div><div class="text-[9px] text-gray-500">{{ user_aktif.role }} | {{ user_aktif.shift.split(' ')[0] }}</div></div>
-                <a href="/logout" class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded text-[10px] font-bold">Keluar</a>
-            </div>
+            <button type="button" id="btnReprint" onclick="cetakUlangStruk()" class="bg-orange-500 hover:bg-orange-600 text-white font-bold px-3 py-1.5 rounded text-xs shadow hidden">🖨️ Cetak Struk Terakhir</button>
+            <button type="button" onclick="bukaModalPrinter()" class="bg-teal-600 hover:bg-teal-700 text-white font-bold px-3 py-1.5 rounded text-xs shadow">🖨️ Setting Printer</button>
+            <a href="/admin" class="font-semibold text-gray-600 hover:text-pos py-1">← Admin</a>
         </div>
     </nav>
-
     <div class="max-w-5xl mx-auto p-4 md:p-6 mt-4">
         <div id="alert_area"></div>
         <div class="bg-white rounded-2xl shadow-md border overflow-hidden flex flex-col md:flex-row">
@@ -842,7 +532,7 @@ POS_HTML = r"""
                     </div>
                 </div>
                 <div id="mode_langsung" class="space-y-4">
-                    <div class="bg-white p-4 rounded-xl border shadow-sm relative"><label class="text-xs font-bold text-gray-700 block mb-2">Nama Pelanggan / Cari Member</label><input type="text" id="input_nama" onkeyup="onKetikPelanggan(event)" autocomplete="off" placeholder="Ketik Nama atau No WA..." class="w-full p-2.5 border rounded text-sm shadow-sm"><div id="dropdown_pelanggan_list" class="absolute left-4 right-4 bg-white border border-gray-300 rounded-lg shadow-lg mt-1 max-h-48 overflow-y-auto z-50 hidden"></div><div id="info_member_pos" class="text-[10px] text-blue-600 font-bold mt-2 hidden"></div><input type="hidden" id="input_wa_pelanggan" value=""></div>
+                    <div class="bg-white p-4 rounded-xl border shadow-sm"><label class="text-xs font-bold text-gray-700 block mb-2">Nama Pelanggan (Walk-in)</label><input type="text" id="input_nama" onkeyup="hitungTotalKasir()" placeholder="Contoh: Bpk. Budi" class="w-full p-2.5 border rounded text-sm shadow-sm"></div>
                     <div class="grid grid-cols-2 gap-4">
                         <div class="border rounded-lg shadow-sm p-3 relative bg-white flex flex-col justify-between">
                             <div class="absolute top-0 left-0 bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-br-lg font-bold">Golden Humi</div>
@@ -900,7 +590,6 @@ POS_HTML = r"""
                         </div>
                     </div>
                 </div>
-
                 <form id="form_pos" class="mt-8" onsubmit="prosesTransaksi(event)">
                     <input type="hidden" name="tipe_transaksi" id="post_tipe" value="Langsung">
                     <input type="hidden" name="id_po" id="post_id_po" value="">
@@ -911,11 +600,8 @@ POS_HTML = r"""
                     <input type="hidden" name="tagihan_aktif" id="post_tagihan" value="0">
                     <input type="hidden" name="nominal_bayar" id="post_bayar" value="0">
                     <input type="hidden" name="metode_pembayaran" id="post_metode" value="Tunai">
-                    <input type="hidden" name="shift" id="post_shift" value="{{ user_aktif.shift }}">
-                    <input type="hidden" name="nama_petugas" id="post_petugas" value="{{ user_aktif.nama }}">
                     <button type="submit" id="btnSimpan" class="w-full bg-pos hover:bg-poshigh text-white font-black text-lg py-4 rounded-xl shadow-lg">SIMPAN & CETAK STRUK 🖨️</button>
                 </form>
-
             </div>
         </div>
     </div>
@@ -943,25 +629,6 @@ POS_HTML = r"""
         </div>
     </div>
 
-
-    <!-- Modal Laporan Shift -->
-    <div id="modal_shift" class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center hidden">
-        <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-5">
-            <div class="flex justify-between items-center border-b pb-3"><h3 class="font-bold text-gray-800 text-lg">📊 Laporan Jual Kasir (Per Shift)</h3><button type="button" onclick="tutupModalShift()" class="text-gray-400 font-bold text-lg">✕</button></div>
-            <div class="space-y-4 text-sm" id="area_laporan_shift">
-                <div class="text-center py-5 text-gray-500 font-bold">Memuat data...</div>
-            </div>
-            <div class="flex justify-end pt-2"><button type="button" onclick="cetakLaporanShift()" class="bg-blue-600 text-white px-4 py-2 rounded text-xs font-bold mr-2">🖨️ Cetak Rekap (Thermal)</button><button type="button" onclick="tutupModalShift()" class="bg-gray-200 px-4 py-2 rounded text-xs font-bold">Tutup</button></div>
-        </div>
-    </div>
-    
-    <!-- Hidden Printable Area for Shift Report -->
-    <div id="print_area_shift" class="hidden">
-        <div style="font-family: monospace; width: 280px; padding: 10px; font-size: 12px; line-height: 1.2; color: #000;" id="print_shift_inner">
-        </div>
-    </div>
-
-
     <!-- Modal Setting Printer -->
     <div id="modal_printer" class="fixed inset-0 bg-black bg-opacity-50 z-[100] flex items-center justify-center hidden">
         <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl space-y-5">
@@ -985,17 +652,6 @@ POS_HTML = r"""
     <script>
         const HARGA_PER_KG = {{ config.get('Harga Per Kg', 52500.0) }};
         let modeAktif = 'Langsung', metodeAktif = 'Tunai', tagihanAktif = 0, subtotalGlobal = 0, objPO = null;
-        
-        window.addEventListener('DOMContentLoaded', () => {
-            let pm = localStorage.getItem('print_method') || 'browser';
-            let radios = document.getElementsByName('print_method');
-            for(let r of radios) {
-                if(r.value === pm) r.checked = true;
-                r.addEventListener('change', (e) => {
-                    localStorage.setItem('print_method', e.target.value);
-                });
-            }
-        });
         let bluetoothDevice = null, printCharacteristic = null, lastTransactionData = null;
 
         function switchMode(mode) {
@@ -1009,7 +665,7 @@ POS_HTML = r"""
                 modeAktif = 'Langsung'; document.getElementById('post_tipe').value = modeAktif;
                 elPo.style.display = 'none'; elBeratAktual.classList.add('hidden'); elLangsung.style.display = 'block';
                 document.getElementById('row_dp').classList.add('hidden'); document.getElementById('row_total_awal').classList.add('hidden'); document.getElementById('row_subtotal').classList.remove('hidden');
-                document.getElementById('label_tagihan').innerText = "TOTAL YANG HARUS DIBAYAR"; objPO = null; document.getElementById('info_member_pos')?.classList.add('hidden'); document.getElementById('input_wa_pelanggan').value = ''; hitungTotalKasir();
+                document.getElementById('label_tagihan').innerText = "TOTAL YANG HARUS DIBAYAR"; objPO = null; hitungTotalKasir();
             }
         }
         function pilihMetode(metode) { metodeAktif = metode; document.getElementById('post_metode').value = metodeAktif; updatePaymentUI(); }
@@ -1048,98 +704,6 @@ POS_HTML = r"""
             }
             updatePaymentUI();
         }
-        let searchPelangganTimeout = null;
-        function onKetikPelanggan(e) {
-            hitungTotalKasir();
-            let q = document.getElementById('input_nama').value.trim();
-            let listEl = document.getElementById('dropdown_pelanggan_list');
-            if (q.length < 2) { listEl.classList.add('hidden'); listEl.innerHTML = ''; return; }
-            clearTimeout(searchPelangganTimeout);
-            searchPelangganTimeout = setTimeout(() => {
-                fetch('/api/cari-pelanggan?q=' + encodeURIComponent(q)).then(r => r.json()).then(data => {
-                    if (data.length === 0) { listEl.classList.add('hidden'); return; }
-                    let html = '';
-                    data.forEach(item => {
-                        html += `<div onclick="pilihPelanggan('${item.nama}', '${item.wa}', ${item.diskon}, '${item.kategori}')" class="p-3 hover:bg-blue-50 cursor-pointer border-b text-xs flex justify-between"><div><span class="font-bold">${item.nama}</span><br><span class="text-gray-500 text-[10px]">${item.wa}</span></div><div class="font-bold text-orange-600">Diskon ${item.diskon}%</div></div>`;
-                    });
-                    listEl.innerHTML = html; listEl.classList.remove('hidden');
-                });
-            }, 300);
-        }
-        function pilihPelanggan(nama, wa, diskon, kategori) {
-            document.getElementById('input_nama').value = nama;
-            document.getElementById('input_wa_pelanggan').value = wa;
-            document.getElementById('dropdown_pelanggan_list').classList.add('hidden');
-            let infoEl = document.getElementById('info_member_pos');
-            infoEl.innerHTML = `✅ Member ${kategori} - Diskon Khusus ${diskon}% Aktif`;
-            infoEl.classList.remove('hidden');
-            document.getElementById('input_diskon_tipe').value = 'persen';
-            document.getElementById('input_diskon_nilai').value = diskon;
-            hitungTotalKasir();
-        }
-
-        function bukaModalShift() { 
-            document.getElementById('modal_shift').classList.remove('hidden');
-            let petugas = document.getElementById('post_petugas').value;
-            let shift = document.getElementById('post_shift').value;
-            fetch('/api/laporan-shift?petugas=' + encodeURIComponent(petugas) + '&shift=' + encodeURIComponent(shift))
-            .then(r => r.json()).then(data => {
-                let html = `
-                    <div class="bg-gray-50 p-4 rounded-xl border space-y-2">
-                        <div class="flex justify-between border-b pb-1"><span>Shift:</span><span class="font-bold">${data.shift}</span></div>
-                        <div class="flex justify-between border-b pb-1"><span>Nama Petugas:</span><span class="font-bold">${data.petugas}</span></div>
-                        <div class="flex justify-between border-b pb-1"><span>Total Trx Hari Ini:</span><span class="font-bold">${data.total_trx} Trx</span></div>
-                    </div>
-                    <div class="bg-blue-50 border border-blue-200 p-4 rounded-xl space-y-2">
-                        <div class="flex justify-between text-blue-800 font-semibold border-b border-blue-200 pb-1"><span>Tunai:</span><span>Rp ${data.tunai.toLocaleString('id-ID')}</span></div>
-                        <div class="flex justify-between text-blue-800 font-semibold border-b border-blue-200 pb-1"><span>QRIS:</span><span>Rp ${data.qris.toLocaleString('id-ID')}</span></div>
-                        <div class="flex justify-between text-blue-900 font-black text-lg pt-1"><span>TOTAL PENDAPATAN:</span><span>Rp ${data.total.toLocaleString('id-ID')}</span></div>
-                    </div>
-                `;
-                document.getElementById('area_laporan_shift').innerHTML = html;
-                
-                let printHtml = `
-                    <div style="text-align: center; font-weight: bold; font-size: 14px;">REKAP SHIFT KASIR</div>
-                    <div style="text-align: center; font-size: 10px;">BUMDES KEMBARAN</div>
-                    <div style="text-align: center; border-bottom: 1px dashed #000; margin: 6px 0;"></div>
-                    <div>Tgl   : ${data.tanggal}</div>
-                    <div>Shift : ${data.shift}</div>
-                    <div>Kasir : ${data.petugas}</div>
-                    <div style="text-align: center; border-bottom: 1px dashed #000; margin: 6px 0;"></div>
-                    <div style="display: flex; justify-content: space-between;"><span>Total Trx:</span><span>${data.total_trx}</span></div>
-                    <div style="display: flex; justify-content: space-between;"><span>Tunai:</span><span>Rp ${data.tunai.toLocaleString('id-ID')}</span></div>
-                    <div style="display: flex; justify-content: space-between;"><span>QRIS:</span><span>Rp ${data.qris.toLocaleString('id-ID')}</span></div>
-                    <div style="text-align: center; border-bottom: 1px dashed #000; margin: 6px 0;"></div>
-                    <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 14px;"><span>TOTAL SETOR:</span><span>Rp ${data.total.toLocaleString('id-ID')}</span></div>
-                    <div style="text-align: center; border-bottom: 1px dashed #000; margin: 6px 0;"></div>
-                    <div style="text-align: center; font-size: 10px; margin-top: 15px;">Ttd Kasir:<br><br><br>(_________________)</div>
-                `;
-                document.getElementById('print_shift_inner').innerHTML = printHtml;
-                
-                lastShiftData = data;
-            });
-        }
-        function tutupModalShift() { document.getElementById('modal_shift').classList.add('hidden'); }
-        
-        let lastShiftData = null;
-        async function cetakLaporanShift() {
-            let pm = localStorage.getItem('print_method') || 'browser';
-            if(pm === 'bluetooth' && printCharacteristic && lastShiftData) {
-                let encoder = new TextEncoder();
-                let textData = `\x1B\x40\x1B\x61\x01REKAP SHIFT KASIR\nBUMDES KEMBARAN\n--------------------------------\nTgl: ${lastShiftData.tanggal}\nShift: ${lastShiftData.shift}\nKasir: ${lastShiftData.petugas}\n--------------------------------\nTotal Trx: ${lastShiftData.total_trx}\nTunai: Rp ${lastShiftData.tunai.toLocaleString('id-ID')}\nQRIS : Rp ${lastShiftData.qris.toLocaleString('id-ID')}\n--------------------------------\nTOTAL SETOR:\nRp ${lastShiftData.total.toLocaleString('id-ID')}\n--------------------------------\nTtd Kasir:\n\n\n(_________________)\n\n\n`;
-                await printCharacteristic.writeValue(encoder.encode(textData));
-            } else {
-                let content = document.getElementById('print_area_shift').innerHTML;
-                let win = window.open('', '', 'height=600,width=400');
-                win.document.write('<html><head><title>Cetak Rekap Shift</title></head><body>');
-                win.document.write(content);
-                win.document.write('</body></html>');
-                win.document.close();
-                win.focus();
-                setTimeout(() => { win.print(); win.close(); }, 300);
-            }
-        }
-
         let searchTimeout = null;
         function onKetikCari(e) {
             let q = document.getElementById('search_po_id').value.trim(), listEl = document.getElementById('dropdown_po_list');
@@ -1275,12 +839,9 @@ ADMIN_HTML = r"""
         <div class="flex space-x-3 text-sm">
             <a href="/admin-kebun" class="bg-emerald-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow">👨‍🌾 Admin Kebun</a>
             <a href="/laporan" class="bg-purple-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow">📊 Laporan Jual</a>
-            <a href="/admin-pelanggan" class="bg-blue-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow">👥 Pelanggan</a>
             <a href="/pos" class="bg-sky-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow">🛒 Buka Kasir</a>
             <a href="/config-admin" class="bg-gray-800 text-white px-3 py-1.5 rounded font-bold text-xs shadow">⚙️ Setting Web</a>
-            <a href="/admin-users" class="bg-indigo-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow">👥 Users</a>
-            <a href="/logout" class="bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow">🚪 Keluar</a>
-            <a href="/pre-order" class="font-semibold text-gray-600 hover:text-orange-600 py-1 ml-2 border-l pl-2">← Ke Depan</a>
+            <a href="/pre-order" class="font-semibold text-gray-600 hover:text-orange-600 py-1">← Form Utama</a>
         </div>
     </nav>
     <div class="max-w-7xl mx-auto p-4 md:p-6 space-y-6">
@@ -1350,7 +911,7 @@ CONFIG_ADMIN_HTML = r"""
 <head><meta charset="UTF-8"><title>Setting Config</title><script src="https://cdn.tailwindcss.com"></script></head>
 <body class="bg-gray-100 p-6">
     <div class="max-w-xl mx-auto bg-white rounded-2xl shadow p-6 space-y-6">
-        <div class="flex justify-between items-center border-b pb-4"><h1 class="text-lg font-bold">⚙️ Pengaturan Aplikasi</h1><div class="space-x-2"><a href="/admin" class="text-xs bg-gray-200 px-3 py-1.5 rounded font-bold">Kembali</a><a href="/logout" class="text-xs bg-red-100 text-red-700 hover:bg-red-200 px-3 py-1.5 rounded font-bold">Keluar</a></div></div>
+        <div class="flex justify-between items-center border-b pb-4"><h1 class="text-lg font-bold">⚙️ Pengaturan Aplikasi</h1><a href="/admin" class="text-xs bg-gray-200 px-3 py-1.5 rounded font-bold">Kembali</a></div>
         <form action="/save-config" method="POST" class="space-y-4">
             <div><label class="text-xs font-bold">Kuota Promo</label><input type="number" name="kuota_promo" value="{{ config.get('Kuota Promo', 0) }}" class="w-full p-2 border rounded text-sm" required></div>
             <div><label class="text-xs font-bold">Diskon (%)</label><input type="text" name="persen_diskon" value="{{ config.get('Persen Diskon', 0) }}" class="w-full p-2 border rounded text-sm" required></div>
@@ -1373,10 +934,9 @@ LAPORAN_HTML = r"""
 <body class="bg-gray-50 min-h-screen">
     <nav class="bg-white shadow-sm border-b px-6 py-4 flex justify-between items-center sticky top-0 z-50">
         <div class="flex items-center space-x-3"><span class="text-xl font-black text-emerald-600">📊 Laporan Live (Google Sheets)</span></div>
-        <div class="flex space-x-3 text-sm items-center">
+        <div class="flex space-x-3 text-sm">
             <a href="/admin-kebun" class="bg-emerald-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow">👨‍🌾 Admin Kebun</a>
-            <a href="/admin" class="bg-gray-800 text-white px-3 py-1.5 rounded font-bold text-xs shadow">← Ke Admin</a>
-            <a href="/logout" class="bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow ml-2">🚪 Keluar</a>
+            <a href="/admin" class="bg-gray-800 text-white px-3 py-1.5 rounded font-bold text-xs shadow">← Kembali ke Admin</a>
         </div>
     </nav>
     <div class="max-w-7xl mx-auto p-4 md:p-6 space-y-6">
@@ -1415,221 +975,6 @@ LAPORAN_HTML = r"""
 </html>
 """
 
-
-
-LOGIN_HTML = r"""
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login System BUMDes Kembaran</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>tailwind.config = { theme: { extend: { colors: { pos: '#0284c7', poshigh: '#0369a1' } } } }</script>
-</head>
-<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
-    <div class="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden border">
-        <div class="bg-pos p-6 text-white text-center relative">
-            <div class="w-16 h-16 bg-white rounded-full flex items-center justify-center mx-auto mb-3 shadow-md text-2xl">🔐</div>
-            <h1 class="text-xl font-black tracking-wide">POS BUMDes KEMBARAN</h1>
-            <p class="text-xs text-blue-100 mt-1">Sistem Log In Petugas & Multi Role</p>
-        </div>
-        <form action="/login" method="POST" class="p-6 space-y-4">
-            {% if error %}
-            <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-xs font-bold text-center">
-                {{ error }}
-            </div>
-            {% endif %}
-            <div>
-                <label class="text-xs font-bold text-gray-700 block mb-1">Username / ID User</label>
-                <input type="text" name="username" required placeholder="Contoh: BUDI / KASIR1" class="w-full p-3 border rounded-xl text-sm font-bold bg-gray-50 focus:bg-white focus:border-pos uppercase">
-            </div>
-            <div>
-                <label class="text-xs font-bold text-gray-700 block mb-1">Password</label>
-                <input type="password" name="password" required placeholder="Masukkan password..." class="w-full p-3 border rounded-xl text-sm font-bold bg-gray-50 focus:bg-white focus:border-pos">
-            </div>
-            <div>
-                <label class="text-xs font-bold text-gray-700 block mb-1">Pilih Shift Kerja Hari Ini</label>
-                <select name="shift" class="w-full p-3 border rounded-xl text-sm font-bold bg-gray-50 focus:bg-white focus:border-pos">
-                    <option value="Shift 1 (Pagi)">Shift 1 (Pagi: 07.00 - 15.00)</option>
-                    <option value="Shift 2 (Siang)">Shift 2 (Siang: 15.00 - 23.00)</option>
-                    <option value="Shift 3 (Malam)">Shift 3 (Malam: 23.00 - 07.00)</option>
-                </select>
-            </div>
-            <button type="submit" class="w-full bg-pos hover:bg-poshigh text-white font-black py-3.5 rounded-xl shadow-lg text-sm transition mt-2">
-                MASUK KE SISTEM 🚀
-            </button>
-            <div class="text-center pt-2">
-                <a href="/pre-order" class="text-xs text-gray-500 font-semibold hover:underline">← Halaman Pre-Order Pembeli</a>
-            </div>
-        </form>
-    </div>
-</body>
-</html>
-"""
-
-ADMIN_USERS_HTML = r"""
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Setting User & Role Akses</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-50 min-h-screen">
-    <nav class="bg-white shadow-sm border-b px-6 py-4 flex justify-between items-center sticky top-0 z-50">
-        <div class="flex items-center space-x-3"><span class="text-xl font-black text-indigo-600">👤 Setting User & Hak Akses</span></div>
-        <div class="flex space-x-3 text-sm items-center">
-            <a href="/admin" class="bg-gray-800 text-white px-3 py-1.5 rounded font-bold text-xs shadow">← Ke Admin</a>
-            <a href="/logout" class="bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow ml-2">🚪 Keluar</a>
-        </div>
-    </nav>
-    <div class="max-w-5xl mx-auto p-4 md:p-6 space-y-6">
-        <div class="bg-indigo-50 border border-indigo-200 p-4 rounded-xl shadow-sm text-sm text-indigo-900">
-            <strong>💡 Informasi Hak Akses Role (Sheet: Admin_Users):</strong>
-            <ul class="list-disc list-inside mt-2 space-y-1 text-xs">
-                <li><strong>Admin:</strong> Administrator (Akses Penuh Seluruh Fitur)</li>
-                <li><strong>Admin Keuangan:</strong> Akses Panel Admin POS PRO (/admin), Laporan Jual (/laporan), dan Kasir POS (/pos)</li>
-                <li><strong>Admin Kebun:</strong> Akses Panel Admin Kebun (/admin-kebun)</li>
-                <li><strong>Kasir:</strong> Akses Kasir POS (/pos)</li>
-            </ul>
-            <div class="mt-3">
-                <a href="https://docs.google.com/spreadsheets/d/1nYcOD2tJ006gv9HnzSKi-tbjYLaC9nbGUuKiY02BwAI/edit" target="_blank" class="inline-block bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded font-bold text-xs shadow">Edit Data User di Google Spreadsheet ↗</a>
-            </div>
-        </div>
-
-        <div class="bg-white rounded-2xl shadow-sm border overflow-hidden">
-            <div class="p-5 border-b bg-gray-50"><h2 class="font-bold text-gray-800 text-lg">📋 Daftar User & Role Terdaftar</h2></div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-sm whitespace-nowrap">
-                    <thead class="bg-white text-gray-600 text-xs uppercase border-b">
-                        <tr><th class="p-4">Username</th><th class="p-4">Nama Lengkap</th><th class="p-4">No WhatsApp</th><th class="p-4">Role Akses</th></tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-100">
-                        {% for u in users %}
-                        <tr class="hover:bg-gray-50">
-                            <td class="p-4 font-bold text-gray-800 uppercase">{{ u.username }}</td>
-                            <td class="p-4 font-semibold text-gray-700">{{ u.nama }}</td>
-                            <td class="p-4 text-blue-600 font-semibold">{{ u.wa }}</td>
-                            <td class="p-4">
-                                {% if u.role == 'Admin' %}<span class="bg-purple-100 text-purple-800 px-2.5 py-1 rounded-full text-xs font-bold">Admin</span>
-                                {% elif u.role == 'Admin Keuangan' %}<span class="bg-blue-100 text-blue-800 px-2.5 py-1 rounded-full text-xs font-bold">Admin Keuangan</span>
-                                {% elif u.role == 'Admin Kebun' %}<span class="bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-full text-xs font-bold">Admin Kebun</span>
-                                {% else %}<span class="bg-gray-100 text-gray-800 px-2.5 py-1 rounded-full text-xs font-bold">Kasir</span>{% endif %}
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-"""
-
-PELANGGAN_HTML = r"""
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Panel Data Pelanggan & Diskon</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-gray-50 min-h-screen">
-    <nav class="bg-white shadow-sm border-b px-6 py-4 flex justify-between items-center sticky top-0 z-50">
-        <div class="flex items-center space-x-3"><span class="text-xl font-black text-blue-600">👥 Panel Data Pelanggan</span></div>
-        <div class="flex space-x-3 text-sm items-center">
-            <a href="/admin" class="bg-gray-800 text-white px-3 py-1.5 rounded font-bold text-xs shadow">← Ke Admin</a>
-            <a href="/logout" class="bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded font-bold text-xs shadow ml-2">🚪 Keluar</a>
-        </div>
-    </nav>
-    <div class="max-w-5xl mx-auto p-4 md:p-6 space-y-6">
-        <div class="bg-blue-50 border border-blue-200 p-4 rounded-xl shadow-sm text-sm text-blue-800">
-            <strong>💡 Info:</strong> Panel ini membaca data langsung dari <strong>Google Spreadsheet (Sheet: DataPelanggan)</strong>. Untuk menambah atau mengubah data pelanggan, kategori, dan besaran diskon, silakan edit langsung di Spreadsheet Anda.
-            <div class="mt-2">
-                <a href="https://docs.google.com/spreadsheets/d/1nYcOD2tJ006gv9HnzSKi-tbjYLaC9nbGUuKiY02BwAI/edit" target="_blank" class="inline-block bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded font-bold text-xs shadow">Buka Google Spreadsheet ↗</a>
-            </div>
-        </div>
-
-        <div class="bg-white rounded-2xl shadow-sm border overflow-hidden">
-            <div class="p-5 border-b bg-gray-50"><h2 class="font-bold text-gray-800 text-lg">📋 Daftar Pelanggan & Diskon Khusus</h2></div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-sm whitespace-nowrap">
-                    <thead class="bg-white text-gray-600 text-xs uppercase border-b">
-                        <tr><th class="p-4">Nama Pelanggan</th><th class="p-4">No WhatsApp</th><th class="p-4">Kategori</th><th class="p-4">Diskon Khusus</th><th class="p-4">Status</th><th class="p-4">Catatan</th></tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-100">
-                        {% for p in pelanggan %}
-                        <tr class="hover:bg-gray-50">
-                            <td class="p-4 font-bold text-gray-800">{{ p.nama }}</td>
-                            <td class="p-4 text-blue-600 font-semibold">{{ p.wa }}</td>
-                            <td class="p-4"><span class="bg-purple-100 text-purple-700 px-2 py-1 rounded text-xs font-bold">{{ p.kategori }}</span></td>
-                            <td class="p-4 font-black text-orange-600">{{ p.diskon }}%</td>
-                            <td class="p-4">
-                                {% if p.status|lower == 'aktif' %}<span class="bg-green-100 text-green-700 px-2 py-1 rounded-full text-[10px] font-bold">Aktif</span>
-                                {% else %}<span class="bg-red-100 text-red-700 px-2 py-1 rounded-full text-[10px] font-bold">Nonaktif</span>{% endif %}
-                            </td>
-                            <td class="p-4 text-xs text-gray-500">{{ p.catatan }}</td>
-                        </tr>
-                        {% endfor %}
-                        {% if not pelanggan %}
-                        <tr><td colspan="6" class="p-8 text-center text-gray-400 font-bold">Belum ada data pelanggan di Spreadsheet.</td></tr>
-                        {% endif %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-"""
-
-
-@app.get("/login", response_class=HTMLResponse)
-def login_page(error: str = ""):
-    return HTMLResponse(content=Template(LOGIN_HTML).render(error=error))
-
-@app.post("/login")
-def process_login(response: Response, username: str = Form(...), password: str = Form(...), shift: str = Form(...)):
-    sheet = get_gspread_sheet("Admin_Users")
-    if not sheet: return RedirectResponse(url="/login?error=Gagal+koneksi+ke+Database+User", status_code=303)
-    try:
-        records = sheet.get_all_values()
-        user_found = False
-        for row in records[1:]:
-            if len(row) >= 5 and row[0].upper() == username.upper() and row[1] == password:
-                user_found = True
-                nama, _, role = row[2], row[3], row[4]
-                token = create_session_token(username.upper(), nama, role, shift)
-                if role == "Kasir":
-                    target_url = "/pos"
-                elif role == "Admin Kebun":
-                    target_url = "/admin-kebun"
-                else:
-                    target_url = "/admin"
-                response = RedirectResponse(url=target_url, status_code=303)
-                response.set_cookie(key="session_token", value=token, httponly=True, max_age=86400) # 24 hours
-                return response
-        if not user_found: return RedirectResponse(url="/login?error=Username+atau+Password+salah!", status_code=303)
-    except Exception as e: return RedirectResponse(url=f"/login?error=Error:{str(e)}", status_code=303)
-
-@app.get("/logout")
-def logout(response: Response):
-    response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie("session_token")
-    return response
-
-@app.get("/admin-users", response_class=HTMLResponse)
-def admin_users_page(user: dict = Depends(require_role(["Admin"]))):
-    sheet = get_gspread_sheet("Admin_Users")
-    users = []
-    if sheet:
-        try:
-            raw_data = sheet.get_all_values()
-            for row in raw_data[1:]:
-                if len(row) >= 5: users.append({"username": row[0], "nama": row[2], "wa": row[3], "role": row[4]})
-        except Exception: pass
-    return HTMLResponse(content=Template(ADMIN_USERS_HTML).render(users=users, user_aktif=user))
-
-
 @app.get("/", response_class=HTMLResponse)
 def root(): return RedirectResponse(url="/pre-order")
 
@@ -1637,40 +982,23 @@ def root(): return RedirectResponse(url="/pre-order")
 def pre_order_page(): return HTMLResponse(content=Template(PRE_ORDER_HTML).render(config=get_app_config()))
 
 @app.get("/pos", response_class=HTMLResponse)
-def pos_page(request: Request, user: dict = Depends(require_role(["Admin", "Admin Keuangan", "Kasir"]))):
-    return HTMLResponse(content=Template(POS_HTML).render(config=get_app_config(), user_aktif=user))
+def pos_page(request: Request): return HTMLResponse(content=Template(POS_HTML).render(config=get_app_config()))
 
 @app.get("/admin-kebun", response_class=HTMLResponse)
-def admin_kebun_page(db: Session = Depends(get_db), user: dict = Depends(require_role(["Admin", "Admin Kebun"]))):
+def admin_kebun_page(db: Session = Depends(get_db)):
     pesanan_list = db.query(PesananDB).filter(PesananDB.status_pelunasan != 'Sudah Lunas', PesananDB.status_dp == 'Sudah').all()
     semua_stok = db.query(StokKebunDB).all()
     denah = {l: {b: [] for b in range(1, 11)} for l in ['A','B','C','D','E','F','G']}
     stok_g, stok_w = [], []
-    
-    rekap_stok = {
-        "Golden": {"Tersedia_Butir": 0, "Tersedia_Kg": 0.0, "Dipesan_Butir": 0, "Dipesan_Kg": 0.0},
-        "White": {"Tersedia_Butir": 0, "Tersedia_Kg": 0.0, "Dipesan_Butir": 0, "Dipesan_Kg": 0.0}
-    }
-    
     for s in semua_stok:
         if s.lajur in denah and 1 <= s.baris <= 10:
             denah[s.lajur][s.baris].append({"id": s.id_stok, "jenis": s.jenis_buah, "berat": s.berat, "status": s.status, "pemesan": s.nama_pemesan or "-"})
-        
-        if s.jenis_buah in rekap_stok:
-            if s.status == "Tersedia":
-                rekap_stok[s.jenis_buah]["Tersedia_Butir"] += 1
-                rekap_stok[s.jenis_buah]["Tersedia_Kg"] += s.berat
-            elif s.status in ["Dipesan", "Terjual", "Sudah Lunas"]:
-                rekap_stok[s.jenis_buah]["Dipesan_Butir"] += 1
-                rekap_stok[s.jenis_buah]["Dipesan_Kg"] += s.berat
-
         if s.jenis_buah == "Golden": stok_g.append(s)
         elif s.jenis_buah == "White": stok_w.append(s)
-        
-    return Template(ADMIN_KEBUN_HTML).render(pesanan_list=pesanan_list, denah=denah, stok_g=stok_g, stok_w=stok_w, rekap_stok=rekap_stok)
+    return Template(ADMIN_KEBUN_HTML).render(pesanan_list=pesanan_list, denah=denah, stok_g=stok_g, stok_w=stok_w)
 
 @app.post("/input-stok")
-def input_stok(background_tasks: BackgroundTasks, lajur: str = Form(...), baris: int = Form(...), jenis_buah: str = Form(...), berat: float = Form(...), db: Session = Depends(get_db)):
+def input_stok(lajur: str = Form(...), baris: int = Form(...), jenis_buah: str = Form(...), berat: float = Form(...), db: Session = Depends(get_db)):
     id_stok = f"{jenis_buah}-{lajur}-{baris}"
     stok = db.query(StokKebunDB).filter_by(id_stok=id_stok).first()
     if stok:
@@ -1680,26 +1008,14 @@ def input_stok(background_tasks: BackgroundTasks, lajur: str = Form(...), baris:
         stok = StokKebunDB(id_stok=id_stok, lajur=lajur, baris=baris, jenis_buah=jenis_buah, berat=berat)
         db.add(stok)
     db.commit()
-    
-    all_stok = db.query(StokKebunDB).all()
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    stok_data = [[s.id_stok, s.lajur, s.baris, s.jenis_buah, s.berat, s.status, s.id_pesanan or "-", s.nama_pemesan or "-", waktu] for s in all_stok]
-    background_tasks.add_task(bg_task_sync_full_stok_kebun, stok_data)
-    
     return RedirectResponse(url="/admin-kebun", status_code=303)
 
 @app.get("/hapus-stok/{id_stok}")
-def hapus_stok(id_stok: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def hapus_stok(id_stok: str, db: Session = Depends(get_db)):
     stok = db.query(StokKebunDB).filter_by(id_stok=id_stok).first()
     if stok:
         db.delete(stok)
         db.commit()
-        
-    all_stok = db.query(StokKebunDB).all()
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    stok_data = [[s.id_stok, s.lajur, s.baris, s.jenis_buah, s.berat, s.status, s.id_pesanan or "-", s.nama_pemesan or "-", waktu] for s in all_stok]
-    background_tasks.add_task(bg_task_sync_full_stok_kebun, stok_data)
-        
     return RedirectResponse(url="/admin-kebun", status_code=303)
 
 @app.post("/update-kebun/{id_pesanan}")
@@ -1720,12 +1036,7 @@ def update_kebun(id_pesanan: str, background_tasks: BackgroundTasks, id_sg: str 
     db.commit()
     if id_sg or id_sw:
         background_tasks.add_task(bg_task_update_sel, id_pesanan, {12: lg, 13: bg, 14: lw, 15: bw, 16: ag, 17: aw})
-        
-    all_stok = db.query(StokKebunDB).all()
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    stok_data = [[s.id_stok, s.lajur, s.baris, s.jenis_buah, s.berat, s.status, s.id_pesanan or "-", s.nama_pemesan or "-", waktu] for s in all_stok]
-    background_tasks.add_task(bg_task_sync_full_stok_kebun, stok_data)
-    
+        background_tasks.add_task(bg_task_sync_aktual_kebun, id_pesanan, order.nama_pelanggan, lg, bg, ag, lw, bw, aw)
     return {"status": "success"}
 
 @app.get("/api/search-po")
@@ -1766,8 +1077,7 @@ def api_submit_pos(
     background_tasks: BackgroundTasks,
     tipe_transaksi: str = Form(...), id_po: str = Form(""), nama_pelanggan: str = Form("Pelanggan Umum"),
     qty_golden: float = Form(0.0), qty_white: float = Form(0.0), diskon_keterangan: str = Form("-"),
-    tagihan_aktif: float = Form(0.0), nominal_bayar: float = Form(0.0), metode_pembayaran: str = Form("Tunai"), 
-    shift: str = Form("Shift 1"), nama_petugas: str = Form("Kasir"), db: Session = Depends(get_db)
+    tagihan_aktif: float = Form(0.0), nominal_bayar: float = Form(0.0), metode_pembayaran: str = Form("Tunai"), db: Session = Depends(get_db)
 ):
     try:
         kembalian = nominal_bayar - tagihan_aktif if metode_pembayaran == "Tunai" else 0.0
@@ -1779,8 +1089,7 @@ def api_submit_pos(
             id_referensi=id_po if (tipe_transaksi == "Pelunasan PO" and id_po) else "-", 
             nama_pelanggan=nama_pelanggan, qty_golden=qty_golden, qty_white=qty_white, 
             diskon_keterangan=diskon_keterangan or "-", total_tagihan=tagihan_aktif, 
-            dibayar=nominal_bayar, kembalian=kembalian, metode_pembayaran=metode_pembayaran,
-            shift=shift, nama_petugas=nama_petugas
+            dibayar=nominal_bayar, kembalian=kembalian, metode_pembayaran=metode_pembayaran
         )
         db.add(new_trx)
         if tipe_transaksi == "Pelunasan PO" and id_po:
@@ -1789,7 +1098,7 @@ def api_submit_pos(
                 order.status_pelunasan = "Sudah Lunas"
                 background_tasks.add_task(bg_task_update_sel, id_po, {21: "Sudah Lunas"})
         db.commit()
-        row_data = [id_pos, tanggal, tipe_transaksi, new_trx.id_referensi, nama_pelanggan, qty_golden, qty_white, diskon_keterangan or "-", tagihan_aktif, nominal_bayar, kembalian, metode_pembayaran, shift, nama_petugas]
+        row_data = [id_pos, tanggal, tipe_transaksi, new_trx.id_referensi, nama_pelanggan, qty_golden, qty_white, diskon_keterangan or "-", tagihan_aktif, nominal_bayar, kembalian, metode_pembayaran]
         background_tasks.add_task(bg_task_tambah_pos, row_data)
         
         trx_dict = {
@@ -1846,7 +1155,7 @@ def success_page(id: str, db: Session = Depends(get_db)):
     return HTMLResponse(content=Template(SUCCESS_HTML).render(order=order, qris_url_encoded=dq, wa_link=wa_link))
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_dashboard(db: Session = Depends(get_db), user: dict = Depends(require_role(["Admin", "Admin Keuangan"]))):
+def admin_dashboard(db: Session = Depends(get_db)):
     pl = db.query(PesananDB).all()
     t_dp = sum(p.nominal_dp_diterima for p in pl)
     return Template(ADMIN_HTML).render(
@@ -1856,7 +1165,7 @@ def admin_dashboard(db: Session = Depends(get_db), user: dict = Depends(require_
     )
 
 @app.get("/laporan", response_class=HTMLResponse)
-def laporan_page(user: dict = Depends(require_role(["Admin", "Admin Keuangan"]))):
+def laporan_page():
     sheet = get_gspread_sheet("POS")
     transaksi = []
     if sheet:
@@ -1888,7 +1197,7 @@ def laporan_page(user: dict = Depends(require_role(["Admin", "Admin Keuangan"]))
     return HTMLResponse(content=Template(LAPORAN_HTML).render(transaksi=transaksi, rekap_metode=rekap_metode, rekap_produk=rekap_produk))
 
 @app.get("/config-admin", response_class=HTMLResponse)
-def config_form(user: dict = Depends(require_role(["Admin"]))): return HTMLResponse(content=Template(CONFIG_ADMIN_HTML).render(config=get_app_config()))
+def config_form(): return HTMLResponse(content=Template(CONFIG_ADMIN_HTML).render(config=get_app_config()))
 
 @app.post("/save-config")
 def save_config(kuota_promo: int=Form(...), persen_diskon: str=Form(...), tanggal_panen: str=Form(...), wa_utama: str=Form(...), wa_keuangan: str=Form(...), wa_kebun: str=Form(...), harga_per_kg: str=Form(...)):
@@ -1938,143 +1247,3 @@ async def delete_orders(request: Request, db: Session = Depends(get_db)):
                 if len(records[i]) > 0 and records[i][0] in ids: sheet.delete_rows(i + 1)
         except Exception: pass
     return RedirectResponse(url="/admin", status_code=303)
-
-
-
-
-@app.get("/api/tiket-panen/{id_pesanan}")
-def api_tiket_panen(id_pesanan: str, db: Session = Depends(get_db)):
-    order = db.query(PesananDB).filter_by(id_pesanan=id_pesanan).first()
-    if not order: raise HTTPException(status_code=404, detail="Pesanan tidak ditemukan")
-    stok = db.query(StokKebunDB).filter_by(id_pesanan=id_pesanan).all()
-    items = [{"jenis": "Golden" if s.jenis_buah == "Golden" else "White", "lajur": s.lajur, "baris": s.baris, "berat": s.berat} for s in stok]
-    return {"id_pesanan": id_pesanan, "nama_pelanggan": order.nama_pelanggan, "items": items}
-
-@app.get("/cetak-sold-out/{id_pesanan}", response_class=HTMLResponse)
-
-def cetak_sold_out(id_pesanan: str, db: Session = Depends(get_db)):
-    order = db.query(PesananDB).filter_by(id_pesanan=id_pesanan).first()
-    if not order:
-        return HTMLResponse("Pesanan tidak ditemukan.")
-        
-    stok_sold = db.query(StokKebunDB).filter_by(id_pesanan=id_pesanan).all()
-    
-    html = '''
-    <!DOCTYPE html>
-    <html lang="id">
-    <head>
-        <meta charset="UTF-8"><title>Cetak Sold Out</title>
-        <style>
-            body { font-family: monospace; width: 280px; margin: 0 auto; padding: 10px; font-size: 12px; line-height: 1.2; color: #000; }
-            .center { text-align: center; }
-            .bold { font-weight: bold; }
-            .line { border-bottom: 1px dashed #000; margin: 6px 0; }
-            .item { margin-bottom: 10px; }
-            @media print {
-                @page { margin: 0; }
-                body { margin: 0; padding: 5px; }
-            }
-        </style>
-    </head>
-    <body onload="window.print(); setTimeout(() => window.close(), 1000);">
-        <div class="center bold" style="font-size: 14px;">BUMDES KEMBARAN</div>
-        <div class="center" style="font-size: 10px;">TIKET PANEN KEBUN (SOLD OUT)</div>
-        <div class="line"></div>
-    '''
-    
-    html += f'<div class="item">'
-    html += f'<div>ID PO : {id_pesanan}</div>'
-    html += f'<div>Plg   : {order.nama_pelanggan}</div>'
-    html += f'<div class="line"></div>'
-    
-    if not stok_sold:
-        html += '<div class="center">Belum ada buah yang diplot untuk pelanggan ini.</div>'
-    else:
-        for item in stok_sold:
-            jns = "Golden" if item.jenis_buah == "Golden" else "White"
-            html += f'<div>- {jns} (Lajur {item.lajur} - Baris {item.baris}): {item.berat} Kg</div>'
-    
-    html += f'<div class="line"></div></div>'
-            
-    html += '''
-        <div class="center" style="font-size: 10px; margin-top: 10px;">Dicetak pada: ''' + datetime.now().strftime("%Y-%m-%d %H:%M") + '''</div>
-    </body>
-    </html>
-    '''
-    return HTMLResponse(content=html)
-
-
-@app.get("/export-stok-kebun")
-def export_stok_kebun(db: Session = Depends(get_db)):
-    stok = db.query(StokKebunDB).all()
-    csv_lines = ["ID Stok,Lajur,Baris,Jenis Buah,Berat Aktual (KG),Status,ID Pesanan (PO),Nama Pemesan"]
-    for s in stok:
-        id_pes = str(s.id_pesanan or "-").replace(",", " ")
-        nama_pem = str(s.nama_pemesan or "-").replace(",", " ")
-        csv_lines.append(f"{s.id_stok},{s.lajur},{s.baris},{s.jenis_buah},{s.berat},{s.status},{id_pes},{nama_pem}")
-    
-    return Response(content="\n".join(csv_lines), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=Laporan_Stok_Kebun_BUMDes.csv"})
-
-@app.get("/admin-pelanggan", response_class=HTMLResponse)
-def admin_pelanggan_page(user: dict = Depends(require_role(["Admin", "Admin Keuangan"]))):
-    sheet = get_gspread_sheet("DataPelanggan")
-    data_pelanggan = []
-    if sheet:
-        try:
-            raw_data = sheet.get_all_values()
-            if len(raw_data) > 1:
-                for row in raw_data[1:]:
-                    row_padded = row + [""] * (6 - len(row))
-                    data_pelanggan.append({
-                        "nama": row_padded[0], "wa": row_padded[1], "kategori": row_padded[2],
-                        "diskon": row_padded[3], "status": row_padded[4], "catatan": row_padded[5]
-                    })
-        except Exception: pass
-    return HTMLResponse(content=Template(PELANGGAN_HTML).render(pelanggan=data_pelanggan))
-
-@app.get("/api/cari-pelanggan")
-def cari_pelanggan_api(q: str):
-    sheet = get_gspread_sheet("DataPelanggan")
-    results = []
-    if sheet:
-        try:
-            raw_data = sheet.get_all_values()
-            if len(raw_data) > 1:
-                for row in raw_data[1:]:
-                    row_padded = row + [""] * (6 - len(row))
-                    nama, wa, kat, diskon, status, cat = row_padded
-                    if status.lower() == 'aktif' and (q.lower() in nama.lower() or q.lower() in wa.lower()):
-                        try: diskon_val = float(diskon)
-                        except: diskon_val = 0.0
-                        results.append({"nama": nama, "wa": wa, "kategori": kat, "diskon": diskon_val})
-        except Exception: pass
-    return results
-
-@app.get("/api/laporan-shift")
-def api_laporan_shift(petugas: str = "", shift: str = "", db: Session = Depends(get_db)):
-    hari_ini = datetime.now().strftime("%Y-%m-%d")
-    transaksi = db.query(PosDB).filter(PosDB.tanggal.like(f"{hari_ini}%")).all()
-    
-    total_trx = 0
-    tunai = 0.0
-    qris = 0.0
-    
-    for t in transaksi:
-        # If petugas or shift are provided and don't match, we still calculate all for today if we don't have login session yet.
-        # But realistically we filter if there is a match in DB
-        if petugas and getattr(t, 'nama_petugas', '') and t.nama_petugas != petugas: continue
-        if shift and getattr(t, 'shift', '') and t.shift != shift: continue
-            
-        total_trx += 1
-        if t.metode_pembayaran == 'Tunai': tunai += t.total_tagihan
-        elif t.metode_pembayaran == 'QRIS': qris += t.total_tagihan
-        
-    return {
-        "tanggal": hari_ini,
-        "shift": shift or "Semua Shift",
-        "petugas": petugas or "Semua Kasir",
-        "total_trx": total_trx,
-        "tunai": tunai,
-        "qris": qris,
-        "total": tunai + qris
-    }
