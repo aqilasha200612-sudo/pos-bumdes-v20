@@ -882,19 +882,29 @@ def submit_order(
     id_pes = f"PO-{datetime.now().strftime('%d%H%M%S')}"
     tgl = datetime.now().strftime("%Y-%m-%d %H:%M")
     
+    # ... baris kode sebelumnya di dalam submit_order (sampai variabel tgl) ...
+    
     sheet = get_gspread_sheet("DataPemesan")
     if sheet:
-        sheet.append_row([id_pes, tgl, nama_pelanggan, no_whatsapp, keterangan or "-", total, dp, 0.0, "Belum", qty_golden, qty_white, "-", 0, "-", 0, 0, 0, "Belum"])
-        if kuota_promo > 0:
-            sheet_conf = get_gspread_sheet("Config")
-            if sheet_conf:
-                try: sheet_conf.update_cell(2, 1, kuota_promo - 1)
-                except: pass
+        try:
+            sheet.append_row([id_pes, tgl, nama_pelanggan, no_whatsapp, keterangan or "-", total, dp, 0.0, "Belum", qty_golden, qty_white, "-", 0, "-", 0, 0, 0, "Belum"])
+            if kuota_promo > 0:
+                sheet_conf = get_gspread_sheet("Config")
+                if sheet_conf:
+                    try: sheet_conf.update_cell(2, 1, kuota_promo - 1)
+                    except: pass
+        except Exception as e:
+            # Jika Google Sheets menolak data disimpan (misal karena akses Editor belum dibuka)
+            raise HTTPException(status_code=500, detail=f"GAGAL MENYIMPAN KE GOOGLE SHEETS! Detail error: {str(e)}")
+    else:
+        # Jika credentials.json tidak terbaca atau format salah
+        raise HTTPException(status_code=500, detail="SISTEM GAGAL TERHUBUNG KE GOOGLE SHEETS! Pastikan file credentials.json ada di GitHub.")
                 
     # Direct URL Bypass untuk QRIS Instan (Anti Delay/Kosong)
     url = f"/success?id={id_pes}&nama={urllib.parse.quote(nama_pelanggan)}&wa={no_whatsapp}&qg={qty_golden}&qw={qty_white}&tot={total}&dp={dp}"
     return RedirectResponse(url=url, status_code=303)
-
+                
+  
 @app.get("/success", response_class=HTMLResponse)
 def success_page(id: str, nama: str="", wa: str="", qg: float=0.0, qw: float=0.0, tot: float=0.0, dp: float=0.0):
     config = get_app_config()
